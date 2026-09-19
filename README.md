@@ -52,7 +52,9 @@ Either way you get `dist/terminal-mafia-server` and `dist/terminal-mafia-client`
 | Mafia | Mafia | Kills one player each night; has a private night chat |
 | Double Agent | Mafia | Wins with Mafia, reads CLEAN, but doesn't know who the Mafia are — and they don't know them |
 
-Role table scales with lobby size: 1 Mafia at 4+, Detective at 5+, Doctor at 6+, Double Agent at 8+, 2 Mafia at 7+, 3 at 11+.
+Role table scales with lobby size (kept low on purpose so you see the special roles without needing a full 8-player lobby): 1 Mafia at 2+, Detective at 3+, Doctor at 4+, Double Agent at 5+, 2nd Mafia at 7+, 3rd at 11+.
+
+For local testing with fewer than 4 players, the host can force-start with `/start force` — the game will still assign roles and run, but this is for testing only; the challenge spec requires 4+ players for a real match.
 
 ## Game loop
 
@@ -70,7 +72,8 @@ Role table scales with lobby size: 1 Mafia at 4+, Detective at 5+, Doctor at 6+,
 | Command | When |
 | --- | --- |
 | `/help` `/players` `/role` `/quit` | always |
-| `/bots <n>` `/start` | lobby, host only |
+| `/history` `/history <#>` | always — past matches on this server, or a full role/vote replay of one |
+| `/bots <n>` `/start` `/start force` | lobby, host only (`force` bypasses the 4-player minimum, for testing) |
 | `/kill <name\|#>` | night, Mafia (plain text = mafia-only chat) |
 | `/save <name\|#>` | night, Doctor |
 | `/check <name\|#>` | night, Detective |
@@ -90,4 +93,4 @@ Targets accept a name, a name prefix, or the number shown in the roster.
 
 - **AI bots** — heuristic bot players chat, accuse, vote and use night powers with human-like delays.
 - **Spectator mode** — eliminated players see everything, including a ghost-only chat channel.
-- **Match history** — every game ends with a full role reveal plus the night results and per-day voting record.
+- **Match history** — every game ends with a full role reveal plus the night results and per-day voting record, and it's saved permanently to `data/match-history.json`. Type `/history` any time (lobby, mid-game as a spectator, or after the match) to see every game ever played on this server, and `/history <#>` to replay a specific one — roles, night kills/saves, and every vote. History survives server restarts.
