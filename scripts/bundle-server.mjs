@@ -18,7 +18,7 @@ const OUT_DIR = path.join(ROOT, "build");
 const OUT_FILE = path.join(OUT_DIR, "server.bundle.mjs");
 
 // Order matters: dependencies before dependents.
-const LIB_ORDER = ["ui.mjs", "roles.mjs", "bots.mjs", "game.mjs"];
+const LIB_ORDER = ["ui.mjs", "roles.mjs", "bots.mjs", "history.mjs", "game.mjs"];
 
 function stripLocalImports(src) {
   // Remove `import { a, b } from "./whatever.mjs";` lines — after
