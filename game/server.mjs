@@ -5,11 +5,18 @@ import net from "node:net";
 import os from "node:os";
 import { Game } from "./lib/game.mjs";
 import { c, rule, box, tag, banner } from "./lib/ui.mjs";
+import { loadMatches, recordMatch } from "./lib/history.mjs";
 
 const PORT = Number(process.argv[2] || process.env.PORT || 5555);
 const MIN_PLAYERS = 4;
 
-let game = new Game();
+function freshGame() {
+  const g = new Game();
+  g.onEnd = recordMatch;
+  return g;
+}
+
+let game = freshGame();
 
 function lanAddresses() {
   const out = [];
@@ -19,12 +26,58 @@ function lanAddresses() {
   return out.length ? out : ["127.0.0.1"];
 }
 
+function renderMatchList(list) {
+  const N = Math.min(list.length, 20);
+  const lines = [c.bold + `MATCH HISTORY — ${list.length} game${list.length === 1 ? "" : "s"} recorded` + c.reset, ""];
+  for (let i = 1; i <= N; i++) {
+    const m = list[list.length - i];
+    const when = new Date(m.endedAt).toLocaleString();
+    const winColor = m.winner === "town" ? c.green : c.red;
+    lines.push(
+      `  ${c.bold}#${i}${c.reset}  ${c.gray}${when}${c.reset}  ${m.players}p  ${winColor}${m.winner.toUpperCase()} WON${c.reset}  ${c.gray}(${m.rounds} round${m.rounds === 1 ? "" : "s"})${c.reset}`,
+    );
+  }
+  if (list.length > N) lines.push(c.gray + `  … and ${list.length - N} older match${list.length - N === 1 ? "" : "es"}.` + c.reset);
+  lines.push("", c.gray + "  /history <#> to replay roles and votes for that match." + c.reset);
+  return box(lines, c.gray);
+}
+
+function renderMatchDetail(m, n) {
+  const when = new Date(m.endedAt).toLocaleString();
+  const winColor = m.winner === "town" ? c.green : c.red;
+  const lines = [
+    c.bold + `MATCH #${n} — ${when}` + c.reset,
+    `${m.players} players, ${m.rounds} round${m.rounds === 1 ? "" : "s"} — ` +
+      winColor +
+      c.bold +
+      `${m.winner.toUpperCase()} WON` +
+      c.reset,
+    "",
+    c.bold + "ROLES" + c.reset,
+    ...m.roster.map((r) => {
+      const teamColor = r.team === "mafia" ? c.red : r.team === "town" ? c.cyan : c.gray;
+      return `  ${r.alive ? c.green + "●" + c.reset : c.gray + "✝" + c.reset} ${r.name.padEnd(12)} ${teamColor}${r.role}${c.reset}${r.isBot ? c.gray + "  ·bot" + c.reset : ""}`;
+    }),
+    "",
+    c.bold + "NIGHTS & VOTES" + c.reset,
+  ];
+  for (const e of m.log) {
+    if (e.type === "night") lines.push(`  ${c.blue}night ${e.round}:${c.reset} ${e.result}`);
+    if (e.type === "vote") {
+      lines.push(`  ${c.magenta}day ${e.round}:${c.reset} ${e.result}`);
+      lines.push(`    ${c.gray}${e.record.map((r) => `${r.voter}→${r.target}`).join("  ")}${c.reset}`);
+    }
+  }
+  return box(lines, c.white);
+}
+
 function help(p) {
   const lines = [
     c.bold + "COMMANDS" + c.reset,
     `${c.cyan}/help${c.reset}      this list`,
     `${c.cyan}/players${c.reset}   who is alive, who is gone`,
     `${c.cyan}/role${c.reset}      your secret role`,
+    `${c.cyan}/history${c.reset}   past matches on this server (${c.cyan}/history <#>${c.reset} for a replay)`,
     `${c.cyan}/quit${c.reset}      leave the game`,
   ];
   if (game.phase === "lobby")
@@ -66,6 +119,17 @@ function handleLine(p, raw) {
   // ---- global ----
   if (cmd === "/help") return help(p);
   if (cmd === "/players") return game.send(p, "\n" + game.roster(p));
+  if (cmd === "/history") {
+    const list = loadMatches();
+    if (!list.length) return game.send(p, `${tag.sys} No completed matches yet on this server.`);
+    if (arg) {
+      const n = Number(arg);
+      if (!Number.isInteger(n) || n < 1 || n > list.length)
+        return game.send(p, `${tag.warn} No match #${arg}. Try /history to see matches 1-${list.length}.`);
+      return game.send(p, "\n" + renderMatchDetail(list[list.length - n], n));
+    }
+    return game.send(p, "\n" + renderMatchList(list));
+  }
   if (cmd === "/role")
     return game.send(
       p,
@@ -89,8 +153,18 @@ function handleLine(p, raw) {
     }
     if (cmd === "/start") {
       if (!p.isHost) return game.send(p, `${tag.warn} Only the host (${game.host()?.name}) can start.`);
-      if (game.players.length < MIN_PLAYERS)
-        return game.send(p, `${tag.warn} Need at least ${MIN_PLAYERS} players. Try /bots ${MIN_PLAYERS - game.players.length}.`);
+      const force = arg.trim().toLowerCase() === "force";
+      if (game.players.length < 2) return game.send(p, `${tag.warn} Need at least 2 players to assign roles.`);
+      if (game.players.length < MIN_PLAYERS && !force)
+        return game.send(
+          p,
+          `${tag.warn} Need at least ${MIN_PLAYERS} players. Try /bots ${MIN_PLAYERS - game.players.length}, ` +
+            `or ${c.bold}/start force${c.reset}${c.yellow} to test with fewer (not for real matches — the challenge requires ${MIN_PLAYERS}+).${c.reset}`,
+        );
+      if (force && game.players.length < MIN_PLAYERS)
+        game.broadcast(
+          `${tag.warn} ${c.yellow}Starting in TEST MODE with ${game.players.length} players. Special roles may appear that wouldn't in a real ${MIN_PLAYERS}+ match.${c.reset}`,
+        );
       return startGame();
     }
     game.broadcast(`  ${c.bold}${p.name}${c.reset}${c.gray}:${c.reset} ${line.slice(0, 200)}`);
@@ -102,7 +176,7 @@ function handleLine(p, raw) {
     if (cmd === "/restart") {
       if (!p.isHost) return game.send(p, `${tag.warn} Only the host can restart.`);
       const survivors = game.players.filter((x) => !x.isBot && x.connected);
-      const fresh = new Game();
+      const fresh = freshGame();
       for (const s of survivors) {
         const np = fresh.addPlayer({ name: s.name, socket: s.socket });
         s.socket.__player = np;
