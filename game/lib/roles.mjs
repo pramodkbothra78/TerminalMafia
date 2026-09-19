@@ -44,14 +44,18 @@ export const ROLES = {
   },
 };
 
-// Role table by player count. Town-heavy on purpose: pressure comes from talk.
+// Role table by player count. Town stays a slim majority on purpose —
+// pressure comes from talk, not from raw numbers. Thresholds are kept low
+// so the special roles (Detective, Doctor, Double Agent) show up well
+// before you need a full 8-player lobby to see them.
 export function buildRoleDeck(n) {
   const deck = [];
-  const mafiaCount = n >= 11 ? 3 : n >= 7 ? 2 : 1;
-  for (let i = 0; i < mafiaCount; i++) deck.push("mafia");
-  if (n >= 5) deck.push("detective");
-  if (n >= 6) deck.push("doctor");
-  if (n >= 8) deck.push("double_agent");
+  if (n >= 2) deck.push("mafia");
+  if (n >= 3) deck.push("detective");
+  if (n >= 4) deck.push("doctor");
+  if (n >= 5) deck.push("double_agent");
+  if (n >= 7) deck.push("mafia"); // 2nd mafia
+  if (n >= 11) deck.push("mafia"); // 3rd mafia
   while (deck.length < n) deck.push("villager");
   return deck.slice(0, n);
 }
