@@ -22,6 +22,7 @@ export class Game {
     this._resolve = null;
     this._timer = null;
     this._tick = null;
+    this.onEnd = null; // (summary) => void — set by the server to persist match history
   }
 
   /* ---------------- players ---------------- */
@@ -493,6 +494,23 @@ export class Game {
       }
     }
     this.broadcast("\n" + c.gray + "  Host can type /restart to run it back." + c.reset);
+
+    this.onEnd?.({
+      endedAt: new Date().toISOString(),
+      players: this.players.length,
+      winner,
+      rounds: this.round,
+      roster: this.players.map((p) => ({
+        name: p.name,
+        role: p.role ? p.role.name : "—",
+        team: p.role ? p.role.team : "none",
+        alive: p.alive,
+        isBot: p.isBot,
+      })),
+      // Role reveals + voting patterns only — chat isn't needed for the replay.
+      log: this.log.filter((e) => e.type === "start" || e.type === "night" || e.type === "vote"),
+    });
+
     return true;
   }
 }
