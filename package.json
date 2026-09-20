@@ -13,7 +13,7 @@
     "client": "node game/client.mjs",
     "game:build": "bun build game/server.mjs --compile --outfile dist/terminal-mafia-server && bun build game/client.mjs --compile --outfile dist/terminal-mafia-client",
     "game:build:node": "bash scripts/build-sea.sh",
-    "test": "node test/run-tests.mjs"
+    "test": "node game/tests/run-tests.mjs"
   },
   "license": "MIT"
 }

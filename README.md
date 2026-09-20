@@ -78,8 +78,17 @@ For local testing with fewer than 4 players, the host can force-start with `/sta
 ## Game loop
 
 `Night` (45s) → mafia kill / doctor save / detective check →
-`Dawn` reveal → `Day` discussion (90s, `/skip` to move on) →
+`Dawn` reveal → `Day` discussion (60s, `/skip` to move on) →
 `Vote` (45s, ties = no elimination) → repeat.
+
+Each phase gets its own screen rather than another line of scroll: the match
+opens on a **deal card** that spells out the exact shape of the room (how many
+mafia, which power roles are live), every day opens on a **`DAY n`** title, and
+every vote closes on a **verdict** — bars filling in row by row, the ballot
+published in full, then the eliminated player's role in block letters.
+
+Ballots are secret while the vote is open and public the moment it closes, so
+the room can hold each other to yesterday's votes — and the bots quote them.
 
 **Win conditions**
 
@@ -95,6 +104,7 @@ For local testing with fewer than 4 players, the host can force-start with `/sta
 | `/history` `/history <#>` | always — past matches on this server, or a full role/vote replay of one |
 | `/bots <n>` `/start` `/start force` | lobby, host only (`force` bypasses the 4-player minimum, for testing) |
 | `/kill <name\|#>` | night, Mafia (plain text = mafia-only chat) |
+| `/m <message>` | any live phase, Mafia + Double Agent — private channel the town can't read |
 | `/save <name\|#>` | night, Doctor |
 | `/guard <name\|#>` | night, Bodyguard (can't target yourself) |
 | `/check <name\|#>` | night, Detective |
@@ -117,7 +127,7 @@ npm test                  # full suite, ~5 minutes
 npm test disconnect       # run only tests whose name matches
 ```
 
-35 automated tests drive a **real server over real TCP sockets** — nothing is
+44 automated tests drive a **real server over real TCP sockets** — nothing is
 mocked. Every test asserts that the server process produced no stderr output
 and never exited, on top of its gameplay assertions.
 
@@ -134,6 +144,9 @@ Coverage:
 | Bot personalities | stable assignment, all four types in use, dialogue variety, reaction to deaths, personality shown in the final reveal |
 | Resilience | disconnect during night, disconnect during voting, host handover, reconnect restores role, reconnect mid-vote, all humans leaving at once |
 | Lifecycle | `/restart` second match, history persistence and replay |
+| Presentation | opening deal card sums to the room, verdict publishes the ballot and reveals the role |
+| Leaks | a player who names a hidden role is called out, a guess with no name is not |
+| Private channel | Mafia/Double Agent chat reaches partners, is unreadable by town, refused to town |
 
 The suite is regression-proofed: it was verified by deliberately reintroducing
 four bugs (unbalanced deck, missing duplicate-vote guard, inverted tie
@@ -149,6 +162,9 @@ MAFIA_ROLES="alpha=mafia,bravo=doctor,charlie=detective" \
 node game/server.mjs
 ```
 
+`MAFIA_LEAK=always|never` pins the daily leak slot, so the slip-and-callout
+sequence can be tested deterministically instead of waited for.
+
 `MAFIA_DATA_DIR` relocates the match-history file, which matters for the
 standalone executable.
 
@@ -161,5 +177,18 @@ standalone executable.
   aggressive mafioso silences the loudest player, a quiet one kills whoever
   nobody is watching. Bots also react by name to the previous night's death
   or save. No LLM, no API keys — it all runs inside the server.
+- **Saying too much** — naming a living player's hidden role is knowledge, not
+  a guess, and the room treats it that way. If anyone — bot or human — says
+  "ada is the detective" while that role is still secret, somebody rounds on
+  them (`WAIT. HOW DO YOU KNOW ADA WAS THE DETECTIVE?`) and the speaker becomes
+  the most suspicious player alive, which really does move the vote. Bots only
+  ever leak knowledge they genuinely hold: the Mafia know their partners, and
+  the Double Agent works on the Detective. Accusing someone of being *mafia* is
+  never a leak — that's just an accusation — and neither is repeating a role the
+  room already watched flip, or claiming your own.
+- **A room, not a chatroom** — bots take turns in one conversation and answer
+  what was just said: accusations get rebuttals that name the accuser, pressure
+  gets piled onto, and the previous night's body gets discussed by name. They
+  quote the real published ballot rather than inventing history.
 - **Spectator mode** — eliminated players see everything, including a ghost-only chat channel.
 - **Match history** — every game ends with a full role reveal plus the night results and per-day voting record, and it's saved permanently to `data/match-history.json`. Type `/history` any time (lobby, mid-game as a spectator, or after the match) to see every game ever played on this server, and `/history <#>` to replay a specific one — roles, night kills/saves, and every vote. History survives server restarts.

@@ -537,6 +537,128 @@ await test("match history persists and replays", async (track) => {
 });
 
 /* ------------------------------------------------------------------ */
+/* 7. The showcase moments                                             */
+/* ------------------------------------------------------------------ */
+
+await test("opening card announces the exact shape of the room", async (track) => {
+  const server = await new Server({ night: 2, day: 2, vote: 2 }).start();
+  track(server);
+  const me = new Client(server, "watcher");
+  await me.connect();
+  me.autoPlay();
+  me.send("/bots 7");
+  await sleep(500);
+  me.send("/start");
+  await me.waitFor(/THE NIGHT BEGINS/, 15000);
+  assert(me.saw(/^\s*8 PLAYERS\s*$/), "player count missing from the deal card");
+  assert(me.saw(/^\s*\d+ MAFIA\s*$/), "mafia count missing from the deal card");
+  assert(me.saw(/^\s*\d+ DETECTIVE\s*$/), "detective count missing from the deal card");
+  // Every counted role must add up to the size of the room.
+  const counts = me.lines
+    .map((l) => l.trim().match(/^(\d+) ([A-Z][A-Z ]*)$/))
+    .filter((m) => m && m[2] !== "PLAYERS")
+    .map((m) => Number(m[1]));
+  assert(counts.reduce((a, b) => a + b, 0) === 8, `role counts do not sum to the room: ${counts}`);
+});
+
+await test("a player who knows too much gets called out for it", async (track) => {
+  // Pinned deck + pinned leak slot: ada is the Double Agent, so grim (her
+  // Mafia partner) is holding a secret he can drop in public.
+  const server = await new Server({
+    night: 2,
+    day: 14,
+    vote: 2,
+    leak: "always",
+    roles: "ada=double_agent,grim=mafia,juno=detective,boone=doctor,cinder=villager,dax=villager,echo=villager,watcher=villager",
+  }).start();
+  track(server);
+  const me = new Client(server, "watcher");
+  await me.connect();
+  me.autoPlay({ skip: false });
+  me.send("/bots 7");
+  await sleep(500);
+  me.send("/start");
+  const shout = await me.waitFor(/HOW DO YOU KNOW|just told us|nobody ever said|how do YOU know/, 40000);
+  const at = me.lines.indexOf(shout);
+  // A long callout wraps onto a continuation line, so read the whole thing.
+  const full = me.lines.slice(at, at + 3).join(" ").replace(/\s+/g, " ");
+  assert(/double agent/i.test(full), "the callout did not name the leaked role: " + full);
+  assert(!/^\s*ada·/.test(shout), "the leaked player called out their own cover: " + shout);
+  await me.waitFor(/the room turns on/, 8000);
+});
+
+await test("a correct guess is not treated as a leak", async (track) => {
+  // Nobody may be called out for naming a role that the room already
+  // watched flip, or for a role nobody secretly knows.
+  const server = await new Server({ night: 2, day: 6, vote: 2, leak: "never" }).start();
+  track(server);
+  const me = new Client(server, "watcher");
+  await me.connect();
+  me.autoPlay({ skip: false });
+  me.send("/bots 5");
+  await sleep(500);
+  me.send("/start");
+  await me.waitFor(/DAY 1 — DISCUSSION/, 20000);
+  me.send("i think one of you is the doctor");
+  await sleep(1500);
+  assert(!me.saw(/the room turns on watcher/), "a guess with no name in it was punished as a leak");
+});
+
+await test("verdict publishes the ballot and reveals the role", async (track) => {
+  const server = await new Server({ night: 2, day: 2, vote: 3 }).start();
+  track(server);
+  const me = new Client(server, "watcher");
+  await me.connect();
+  me.autoPlay();
+  me.send("/bots 5");
+  await sleep(500);
+  me.send("/start");
+  await me.waitFor(/(TOWN|MAFIA|JESTER) WINS —/, 120000);
+  assert(me.saw(/ROLE REVEAL/), "no role reveal after an elimination");
+  assert(me.saw(/has been eliminated/), "no elimination line");
+  assert(me.saw(/ballot\s+\w+→/), "the ballot was never published");
+  // The published ballot must account for every living voter.
+  const line = me.lines.find((l) => /ballot\s+\w+→/.test(l));
+  assert((line.match(/→/g) || []).length >= 4, "published ballot is missing voters: " + line);
+});
+
+await test("mafia private channel reaches partners and nobody else", async (track) => {
+  const server = await new Server({
+    night: 3,
+    day: 8,
+    vote: 3,
+    roles: "alpha=mafia,bravo=double_agent,charlie=detective,delta=doctor,echo=villager,foxtrot=villager",
+  }).start();
+  track(server);
+  const names = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+  const cl = {};
+  for (const n of names) {
+    cl[n] = new Client(server, n);
+    await cl[n].connect();
+  }
+  cl.alpha.send("/start");
+  await cl.alpha.waitFor(/DAY 1 — DISCUSSION/, 30000);
+  await sleep(300);
+  cl.alpha.send("/m the detective is charlie");
+  cl.bravo.send("/m understood partner");
+  await sleep(900);
+  const saw = (c2, re) => c2.lines.some((l) => re.test(l));
+  const secret = /the detective is charlie/;
+  const reply = /understood partner/;
+
+  assert(saw(cl.bravo, secret), "the Double Agent never received their partner's tip-off");
+  assert(saw(cl.alpha, reply), "the Double Agent could not reply on the private channel");
+  assert(!saw(cl.alpha, /Unknown command/), "/m was advertised but not implemented");
+  // The whole point of the channel is that the town cannot read it.
+  for (const n of ["charlie", "delta", "echo", "foxtrot"])
+    assert(!saw(cl[n], secret) && !saw(cl[n], reply), `${n} (town) could read the mafia channel`);
+  // And that the town cannot use it.
+  cl.charlie.send("/m hello?");
+  await sleep(400);
+  assert(saw(cl.charlie, /don't have a private channel/), "a townsperson was allowed to use /m");
+});
+
+/* ------------------------------------------------------------------ */
 
 const failed = results.filter((r) => !r.ok);
 const total = results.length;

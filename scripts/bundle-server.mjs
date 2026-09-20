@@ -25,17 +25,6 @@ function stripLocalImports(src) {
   // concatenation everything is in one shared top-level scope already.
   return src.replace(/^import\s*\{[^}]*\}\s*from\s*["']\.\/[^"']+["'];?\s*$/gm, "");
 }
-function convertNodeImportsToCommonJS(src) {
-  return src
-    .replace(
-      /^import\s+([A-Za-z_$][\w$]*)\s+from\s+["'](node:[^"']+)["'];?\s*$/gm,
-      'const $1 = require("$2");'
-    )
-    .replace(
-      /^import\s*\{([^}]+)\}\s*from\s+["'](node:[^"']+)["'];?\s*$/gm,
-      'const {$1} = require("$2");'
-    );
-}
 
 function stripExportKeyword(src) {
   // `export const X = ...` -> `const X = ...`
@@ -48,14 +37,35 @@ function stripShebang(src) {
   return src.replace(/^#!.*\n/, "");
 }
 
+function convertNodeImportsToCommonJS(src) {
+  return src
+    .replace(
+      /^import\s+([A-Za-z_$][\w$]*)\s+from\s+["'](node:[^"']+)["'];?\s*$/gm,
+      'const $1 = require("$2");'
+    )
+    .replace(
+      /^import\s*\{([^}]+)\}\s*from\s+["'](node:[^"']+)["'];?\s*$/gm,
+      'const {$1} = require("$2");'
+    );
+}
+function renameBotsPick(src, filePath) {
+  if (!filePath.endsWith("bots.mjs")) return src;
+  return src
+    .replace(/\bconst pick\s*=/, "const botPick =")
+    .replace(/\bpick\(/g, "botPick(");
+}
 function readAndTransform(filePath) {
   const raw = fs.readFileSync(filePath, "utf8");
   return stripExportKeyword(
     convertNodeImportsToCommonJS(
-      stripLocalImports(stripShebang(raw))
+      renameBotsPick(
+        stripLocalImports(stripShebang(raw)),
+        filePath
+      )
     )
   );
 }
+
 function build() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
 

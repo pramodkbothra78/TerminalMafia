@@ -22,7 +22,7 @@ let portCounter = 5700 + Math.floor(Math.random() * 300);
 export const nextPort = () => portCounter++;
 
 export class Server {
-  constructor({ port = nextPort(), night = 2, day = 2, vote = 2, roles = null } = {}) {
+  constructor({ port = nextPort(), night = 2, day = 2, vote = 2, roles = null, leak = null } = {}) {
     this.port = port;
     this.stderr = [];
     this.stdout = [];
@@ -36,6 +36,7 @@ export class Server {
       MAFIA_DATA_DIR: this.dataDir,
     };
     if (roles) this.env.MAFIA_ROLES = roles;
+    if (leak) this.env.MAFIA_LEAK = leak;
   }
 
   async start() {

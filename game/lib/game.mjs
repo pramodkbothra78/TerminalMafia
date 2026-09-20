@@ -1,8 +1,37 @@
-import { c, rule, box, tag, banner, bar, countdown, icon, bigBanner } from "./ui.mjs";
+import {
+  c,
+  rule,
+  box,
+  tag,
+  banner,
+  bar,
+  countdown,
+  icon,
+  bigBanner,
+  fitBig,
+  center,
+  screen,
+  speech,
+  voteBoard,
+  wrap,
+  strip,
+  SCREEN,
+} from "./ui.mjs";
 import { ROLES, buildRoleDeck } from "./roles.mjs";
-import { botChat, botVote, botNightTarget, BOT_NAMES } from "./bots.mjs";
+import {
+  botChat,
+  botVote,
+  botNightTarget,
+  gotchaLine,
+  rebutLine,
+  slipLine,
+  personaFor,
+  SECRET_ROLES,
+  BOT_NAMES,
+} from "./bots.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const pick = (arr) => (arr && arr.length ? arr[Math.floor(Math.random() * arr.length)] : null);
 
 // Phase lengths can be compressed via env vars — used by the test suite to
 // run a full match in seconds instead of minutes.
@@ -11,6 +40,29 @@ export const TIMINGS = {
   day: Number(process.env.MAFIA_DAY) || 60,
   vote: Number(process.env.MAFIA_VOTE) || 45,
 };
+
+// The reveal screens are paced — a verdict that appears all at once isn't
+// a verdict, it's a paragraph. But when the phase timers are compressed
+// (the test suite runs 2-second phases) the pauses collapse too, so a
+// full match still finishes in seconds instead of stalling on drama.
+const DRAMA = TIMINGS.vote < 10 || TIMINGS.day < 10 ? 0.08 : 1;
+const beat = (ms) => sleep(Math.max(1, Math.round(ms * DRAMA)));
+
+// Centers a group of lines as one block, so numbers in a column stay
+// aligned with each other instead of each line floating independently.
+function centerBlock(lines) {
+  const width = Math.max(...lines.map((l) => strip(l).length));
+  const pad = " ".repeat(Math.max(0, Math.floor((SCREEN - width) / 2)));
+  return lines.map((l) => pad + l);
+}
+
+// "2 MAFIA", "3 VILLAGERS" — Mafia reads as a collective, everything else
+// takes a plural s.
+function countLabel(role, n) {
+  const name = role.name.toUpperCase();
+  if (n === 1 || role.key === "mafia") return `${n} ${name}`;
+  return `${n} ${name}S`;
+}
 
 // Pins specific players to specific roles for reproducible test scenarios,
 // e.g. MAFIA_ROLES="alpha=mafia,bravo=doctor,charlie=detective,delta=villager".
@@ -32,6 +84,11 @@ export class Game {
     this.phase = "lobby"; // lobby | night | day | vote | over
     this.round = 0;
     this.suspicion = {};
+    this.talk = {}; // how much each player has spoken — bots target loud rooms
+    this.ballots = []; // yesterday's published ballot, so bots can quote it
+    this.publicRoles = new Set(); // roles the whole room has seen flipped
+    this.claimed = new Set(); // roles said out loud — true or not, they're public now
+    this.convo = { event: null, lastAccusation: null, slip: null, budget: 0, last: null };
     this.log = []; // match history
     this._resolve = null;
     this._timer = null;
@@ -155,6 +212,39 @@ export class Game {
     return added;
   }
 
+  /* ---------------- the deal ---------------- */
+
+  // The opening card. Everyone learns the exact shape of the room — how
+  // many mafia, which power roles are live — before a single word is
+  // spoken. Revealed line by line, because a wall of text that appears
+  // instantly reads as output, and a list that arrives one line at a
+  // time reads as a dealer turning over cards.
+  async dealCard(deck) {
+    const counts = {};
+    for (const k of deck) counts[k] = (counts[k] || 0) + 1;
+    const order = ["mafia", "double_agent", "detective", "doctor", "bodyguard", "jester", "villager"];
+
+    this.broadcast(banner());
+    await beat(600);
+
+    const rows = [
+      { text: `${this.players.length} PLAYERS`, color: c.white },
+      ...order.filter((k) => counts[k]).map((k) => ({ text: countLabel(ROLES[k], counts[k]), color: ROLES[k].color })),
+    ];
+    const width = Math.max(...rows.map((r) => r.text.length));
+    const pad = " ".repeat(Math.max(0, Math.floor((SCREEN - width) / 2)));
+
+    this.broadcast("");
+    for (const r of rows) {
+      this.broadcast(pad + r.color + c.bold + r.text + c.reset);
+      await beat(r.color === c.white ? 650 : 340);
+    }
+
+    await beat(800);
+    this.broadcast("\n" + centerBlock([c.gray + c.it + "THE NIGHT BEGINS..." + c.reset]).join("\n") + "\n");
+    await beat(900);
+  }
+
   /* ---------------- lifecycle ---------------- */
 
   async start() {
@@ -175,20 +265,7 @@ export class Game {
     });
 
     this.phase = "night";
-    this.broadcast(banner());
-    this.broadcast(
-      box(
-        [
-          c.bold + "The terminal goes quiet. Someone here is lying." + c.reset,
-          "",
-          `Players: ${c.bold}${this.players.length}${c.reset}   Roles in play: ${[...new Set(deck)]
-            .map((k) => ROLES[k].color + ROLES[k].name + c.reset)
-            .join(", ")}`,
-          c.gray + "Type /help at any time. /players lists the room." + c.reset,
-        ],
-        c.red,
-      ),
-    );
+    await this.dealCard(deck);
 
     for (const p of this.players) {
       if (p.isBot) continue;
@@ -199,15 +276,26 @@ export class Game {
             .filter((o) => o.id !== p.id && o.role.team === "mafia")
             .map((o) => `${o.name} (${o.role.name})`)
         : [];
+      // The private half of the deal: your own role, big, on your screen
+      // only. The literal "You are ROLE" line stays — it's what a
+      // reconnecting client and the test harness read the role from.
       this.send(
         p,
         "\n" +
+          screen([
+            center(c.gray + "YOUR ROLE" + c.reset),
+            "",
+            fitBig(p.role.name, p.role.color),
+            "",
+            center(`${c.gray}You are ${c.reset}${p.role.color + c.bold + p.role.name.toUpperCase() + c.reset}`),
+          ]) +
+          "\n" +
           box(
             [
-              `You are ${p.role.color + c.bold + p.role.name.toUpperCase() + c.reset}`,
               c.gray + p.role.blurb + c.reset,
               ...(isConspirator
                 ? [
+                    "",
                     mates.length
                       ? c.red + "Your partners: " + mates.join(", ") + c.reset
                       : c.red + "You work alone." + c.reset,
@@ -224,7 +312,8 @@ export class Game {
       roles: this.players.map((p) => ({ name: p.name, role: p.role.name })),
     });
 
-    await sleep(2500);
+    this.broadcast("\n" + c.gray + "  /help at any time · /players lists the room" + c.reset);
+    await beat(2500);
     await this.loop();
   }
 
@@ -320,7 +409,7 @@ export class Game {
           if (t) this.applyNightAction(b, t);
           this.nudge();
         },
-        1500 + Math.random() * 6000,
+        Math.min(1500 + Math.random() * 6000, TIMINGS.night * 1000 * 0.55),
       );
     }
 
@@ -383,11 +472,13 @@ export class Game {
     const victim = this.players.find((p) => p.id === victimId);
     if (!victim) {
       this.broadcast(c.gray + "  No one was marked. The night passed without a sound." + c.reset);
+      this.lastEvent = { type: "quiet" };
       this.log.push({ type: "night", round: this.round, result: "no kill" });
     } else if (this.actions.save === victim.id) {
       this.broadcast(
         c.green + `  ${victim.name} was attacked — and survived. Someone was watching over them.` + c.reset,
       );
+      this.lastEvent = { type: "save", name: victim.name };
       this.log.push({ type: "night", round: this.round, result: `${victim.name} saved` });
     } else if (this.actions.guard === victim.id && this.alive().some((p) => p.role.key === "bodyguard")) {
       const guard = this.alive().find((p) => p.role.key === "bodyguard");
@@ -413,6 +504,8 @@ export class Game {
             c.gray,
           ),
       );
+      this.publicRoles.add(guard.id);
+      this.lastEvent = { type: "kill", name: guard.name };
       this.log.push({
         type: "night",
         round: this.round,
@@ -433,6 +526,8 @@ export class Game {
             c.gray,
           ),
       );
+      this.publicRoles.add(victim.id);
+      this.lastEvent = { type: "kill", name: victim.name };
       this.log.push({ type: "night", round: this.round, result: `${victim.name} killed (${victim.role.name})` });
     }
   }
@@ -442,6 +537,10 @@ export class Game {
   async day() {
     this.phase = "day";
     this.suspicion = {};
+    // Fresh argument, but it starts from what the room woke up to.
+    this.convo = { event: this.lastEvent || null, lastAccusation: null, slip: null, budget: 0, last: null };
+    this.broadcast("\n" + screen([fitBig(`DAY ${this.round}`, c.yellow)]));
+    await beat(700);
     this.broadcast("\n" + rule(`DAY ${this.round} — DISCUSSION`, c.yellow));
     this.broadcast(
       `${tag.day} Talk. Accuse. Defend. ${c.gray}Just type to speak. ${c.bold}/skip${c.reset}${c.gray} when you're ready to vote.${c.reset}`,
@@ -456,20 +555,7 @@ export class Game {
       );
     }
 
-    const bots = this.alive().filter((p) => p.isBot);
-    for (const b of bots) {
-      const msgs = 1 + Math.floor(Math.random() * 2);
-      for (let i = 0; i < msgs; i++) {
-        setTimeout(
-          () => {
-            if (this.phase !== "day" || !b.alive) return;
-            const line = botChat(b, this);
-            if (line) this.say(b, line);
-          },
-          3000 + Math.random() * (TIMINGS.day * 600),
-        );
-      }
-    }
+    this.startConversation();
 
     await this.waitPhase(TIMINGS.day, () => {
       const humans = this.alive().filter((p) => !p.isBot && p.connected);
@@ -477,14 +563,234 @@ export class Game {
     });
   }
 
-  say(player, text) {
+  /* ---------------- the conversation ---------------- */
+
+  // Bots don't fire off independent one-liners on random timers any more —
+  // they take turns in a single room, and each turn looks at what was just
+  // said. That's the difference between a chatroom and an argument.
+  startConversation() {
+    const bots = this.alive().filter((p) => p.isBot);
+    this.convo.budget = Math.min(26, bots.length * 3 + 4);
+    this.convo.endsAt = Date.now() + TIMINGS.day * 1000;
+    this.convo.beats = 0;
+    // Somebody on the mafia team gets careless most days. This is not a
+    // coin flip buried inside a personality check — the leak is the most
+    // interesting thing that can happen in a discussion, so the day
+    // schedules a slot for it and the first conspirator who actually
+    // holds a secret fills it. If nobody does, the beat passes quietly.
+    // MAFIA_LEAK pins the slot ("always"/"never") so the slip-and-getting-
+    // caught exchange can be tested deterministically. Unset in real matches.
+    const leakMode = process.env.MAFIA_LEAK;
+    this.convo.leakBeat =
+      leakMode === "always"
+        ? 2
+        : leakMode === "never"
+          ? -1
+          : Math.random() < 0.65
+            ? 2 + Math.floor(Math.random() * Math.max(1, this.convo.budget / 3))
+            : -1;
+    const beatMs = Math.max(600, Math.min(2600, (TIMINGS.day * 1000) / 9));
+    this._step = () => {
+      if (this.phase !== "day") return;
+      this.conversationBeat();
+      if (this.convo.budget <= 0) return;
+      this._convo = setTimeout(this._step, beatMs * (0.65 + Math.random() * 0.8));
+    };
+    this._convo = setTimeout(this._step, Math.min(1200, beatMs * 0.7));
+  }
+
+  // A slip is the loudest thing that can happen in a day, so the room
+  // rounds on it immediately rather than whenever the next beat happens
+  // to land — the payoff has to arrive while the line is still on screen.
+  scheduleGotcha() {
+    if (this.phase !== "day" || !this._step) return;
+    clearTimeout(this._convo);
+    this.convo.budget = Math.max(this.convo.budget, 2);
+    this._convo = setTimeout(this._step, Math.max(400, 1100 * DRAMA));
+  }
+
+  stopConversation() {
+    clearTimeout(this._convo);
+    this._convo = null;
+  }
+
+  // One turn of the argument, in priority order: an unanswered slip is
+  // the loudest thing in the room, then an unanswered accusation, then
+  // whoever feels like talking.
+  conversationBeat() {
+    const bots = this.alive().filter((p) => p.isBot);
+    if (!bots.length) return;
+    this.convo.budget--;
+    this.convo.beats = (this.convo.beats || 0) + 1;
+
+    // 1. Somebody said something they couldn't possibly know.
+    const slip = this.convo.slip;
+    if (slip && !slip.answered) {
+      // Neither the person who leaked nor the person whose role was leaked
+      // would draw attention to it — the subject least of all.
+      const responder = pick(bots.filter((b) => b.name !== slip.speaker && b.id !== slip.subjectId));
+      if (responder) {
+        slip.answered = true;
+        const line = gotchaLine(responder, slip);
+        this.say(responder, line.text, { kind: "gotcha" });
+        this.afterGotcha(slip);
+        return;
+      }
+    }
+
+    // 2. The scheduled leak. Only a bot that genuinely holds the secret
+    //    can fill it — bots never invent knowledge they don't have.
+    if (this.convo.beats === this.convo.leakBeat) {
+      this.convo.leakBeat = -1;
+      const conspirators = bots.filter((b) => b.role?.team === "mafia").sort(() => Math.random() - 0.5);
+      for (const b of conspirators) {
+        const line = slipLine(b, this);
+        if (line) {
+          this.say(b, line.text, { kind: "slip" });
+          return;
+        }
+      }
+    }
+
+    // 3. An accused bot answers for itself before anything else happens.
+    const acc = this.convo.lastAccusation;
+    if (acc && !acc.answered) {
+      const accused = bots.find((b) => b.name.toLowerCase() === String(acc.target).toLowerCase());
+      if (accused && accused.name !== acc.by) {
+        acc.answered = true;
+        const line = rebutLine(accused, acc.by);
+        this.say(accused, line.text, { kind: "rebut" });
+        return;
+      }
+    }
+
+    // 4. Otherwise someone speaks up — chattier personalities more often,
+    //    and never the same voice twice in a row if there's an alternative.
+    const notLast = bots.filter((b) => b.id !== this.convo.last);
+    const pool = notLast.length ? notLast : bots;
+    const weighted = [];
+    for (const b of pool) {
+      const n = Math.max(1, Math.round(personaFor(b.name).chatty * 4));
+      for (let i = 0; i < n; i++) weighted.push(b);
+    }
+    const speaker = pick(weighted);
+    if (!speaker) return;
+
+    const ctx = {
+      event: this.convo.event,
+      lastAccusation: this.convo.lastAccusation,
+      // Don't leak with seconds left on the clock — nobody would get to
+      // call it out, and an unanswered slip is just a weird sentence.
+      allowSlip: this.convo.budget > 1 && Date.now() < (this.convo.endsAt || 0) - 4000 * DRAMA,
+    };
+    // A bot never repeats itself, but two bots reaching for the same
+    // template in the same minute is just as obvious — so the room keeps
+    // its own memory of what's already been said today.
+    let line = null;
+    for (let i = 0; i < 3; i++) {
+      const candidate = botChat(speaker, this, ctx);
+      if (!candidate) break;
+      line = candidate;
+      if (!this.convo.recent?.has(candidate.text)) break;
+    }
+    if (!line) return;
+    if (line.kind === "react") this.convo.event = null; // the body gets discussed once
+    this.say(speaker, line.text, { kind: line.kind, target: line.target });
+  }
+
+  // The room's reaction to a caught slip: the person who leaked becomes
+  // the most suspicious player alive, which really does move the vote —
+  // bots weight their ballots by suspicion. Drama with consequences.
+  afterGotcha(slip) {
+    const speaker = this.players.find((p) => p.name === slip.speaker);
+    if (speaker) this.suspicion[speaker.id] = (this.suspicion[speaker.id] || 0) + 3;
+    // Once it's been screamed across the room it isn't secret knowledge
+    // any more, so nobody gets called out for repeating it.
+    if (slip.subjectId) this.claimed.add(slip.subjectId);
+    this.broadcast(
+      "  " + c.yellow + "\u26a0" + c.reset + c.gray + ` the room turns on ${slip.speaker}.` + c.reset,
+    );
+  }
+
+  // Did this line contain knowledge the speaker has no honest way of
+  // holding? Naming someone as mafia is an accusation; naming them as the
+  // Doctor is information, and information has a source.
+  detectSlip(speaker, text) {
+    const lower = text.toLowerCase();
+    if (lower.trim().endsWith("?")) return null; // asking isn't knowing
+    const WORDS = {
+      doctor: "doctor",
+      detective: "detective",
+      bodyguard: "bodyguard",
+      double_agent: "double agent",
+      jester: "jester",
+    };
+    for (const p of this.alive()) {
+      if (p.id === speaker.id) continue;
+      if (!p.role || !SECRET_ROLES.includes(p.role.key)) continue;
+      if (this.publicRoles.has(p.id) || this.claimed.has(p.id)) continue;
+      const word = WORDS[p.role.key];
+      if (!lower.includes(word)) continue;
+      if (!new RegExp(`\\b${p.name.toLowerCase().replace(/[^\w-]/g, "")}\\b`).test(lower)) continue;
+      return {
+        speaker: speaker.name,
+        subject: p.name,
+        subjectId: p.id,
+        role: word,
+        answered: false,
+      };
+    }
+    return null;
+  }
+
+  // Claiming your own role is normal play, not a leak — but it does put
+  // that role into the open, so nobody gets screamed at for repeating it.
+  noteSelfClaim(speaker, text) {
+    if (!speaker.role) return;
+    const word = { double_agent: "double agent" }[speaker.role.key] || speaker.role.key;
+    if (new RegExp(`\\bi(?:'m| am| was)\\b[^.!?]*\\b${word}\\b`, "i").test(text)) this.claimed.add(speaker.id);
+  }
+
+  say(player, text, { kind = "chat", target = null } = {}) {
     const clean = text.slice(0, 240);
     for (const p of this.alive()) {
       if (clean.toLowerCase().includes(p.name.toLowerCase()) && p.id !== player.id)
         this.suspicion[p.id] = (this.suspicion[p.id] || 0) + 1;
     }
+    this.talk[player.id] = (this.talk[player.id] || 0) + 1;
+    this.convo.last = player.id;
+    (this.convo.recent ||= new Set()).add(clean);
+
+    if (kind === "accuse" && target) this.convo.lastAccusation = { by: player.name, target, answered: false };
+    // A human who names exactly one other player has, as far as the room is
+    // concerned, accused them — so the bots answer real people by name too.
+    if (kind === "chat") {
+      const named = this.alive().filter(
+        (p) => p.id !== player.id && new RegExp(`\\b${p.name.toLowerCase()}\\b`).test(clean.toLowerCase()),
+      );
+      if (named.length === 1)
+        this.convo.lastAccusation = { by: player.name, target: named[0].name, answered: false };
+    }
+    if (kind !== "gotcha") {
+      this.noteSelfClaim(player, clean);
+      const slip = this.detectSlip(player, clean);
+      // Only the freshest slip is worth yelling about.
+      if (slip) {
+        this.convo.slip = slip;
+        this.scheduleGotcha();
+      }
+    }
+
     const botMark = player.isBot ? c.gray + "·" + c.reset : "";
-    this.broadcast(`  ${c.bold}${player.name}${botMark}${c.reset}${c.gray}:${c.reset} ${clean}`);
+    const shout = kind === "gotcha";
+    this.broadcast(
+      "\n" +
+        speech(player.name, clean, {
+          mark: botMark,
+          nameColor: shout ? c.red + c.bold : c.bold,
+          textColor: shout ? c.red + c.bold : "",
+        }),
+    );
     this.log.push({ type: "chat", round: this.round, name: player.name, text: clean });
   }
 
@@ -492,6 +798,8 @@ export class Game {
 
   async voting() {
     this.phase = "vote";
+    this.counting = false;
+    this.stopConversation();
     this.players.forEach((p) => (p.vote = null));
     this.broadcast("\n" + rule(`DAY ${this.round} — VOTE`, c.magenta));
     this.broadcast(`${tag.vote} ${c.bold}/vote <name|number>${c.reset} or ${c.bold}/vote skip${c.reset}. No changing your mind.`);
@@ -505,12 +813,12 @@ export class Game {
           if (t) this.castVote(b, t);
           this.nudge();
         },
-        2000 + Math.random() * 10000,
+        Math.min(2000 + Math.random() * 10000, TIMINGS.vote * 1000 * 0.6),
       );
     }
 
     await this.waitPhase(TIMINGS.vote, () => this.alive().every((p) => p.vote || !p.connected));
-    this.resolveVote();
+    await this.resolveVote();
   }
 
   castVote(voter, target) {
@@ -520,11 +828,30 @@ export class Game {
     this.send(voter, `  ${c.magenta}▸${c.reset} ${c.gray}Your vote is locked in:${c.reset} ${label}`);
     const cast = this.alive().filter((p) => p.vote).length;
     const total = this.alive().length;
-    this.broadcast(`  ${c.magenta}▸${c.reset} ${bar(cast, total, 14, c.magenta)} ${c.gray}${cast}/${total} ballots in${c.reset}`);
+    if (!this.counting)
+      this.broadcast(`  ${c.magenta}▸${c.reset} ${bar(cast, total, 14, c.magenta)} ${c.gray}${cast}/${total} ballots in${c.reset}`);
     return true;
   }
 
-  resolveVote() {
+  // The published ballot: who put the rope on whom. Secret while the vote
+  // is open, on the record the moment it closes.
+  ballotLine(record) {
+    if (!record.length) return "";
+    const pairs = record.map((r) => `${r.voter}\u2192${r.target === "\u2014" ? "skip" : r.target}`);
+    // wrap() normalises whitespace, so the separator has to be a character.
+    // A full room on one line overruns an 80-column terminal, so the ballot
+    // wraps with a hanging indent under the label.
+    const label = "  ballot  ";
+    const lines = wrap(pairs.join(" \u00b7 "), SCREEN - label.length);
+    return lines
+      .map((l, i) => (i === 0 ? c.gray + label + c.reset : " ".repeat(label.length)) + c.gray + l + c.reset)
+      .join("\n");
+  }
+
+  async resolveVote() {
+    // Ballots are closed. Late arrivals from a bot timer must not print
+    // a progress bar into the middle of the verdict screen.
+    this.counting = true;
     const tally = {};
     const record = [];
     for (const p of this.alive()) {
@@ -550,39 +877,63 @@ export class Game {
       .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
     const abstained = this.alive().filter((p) => !p.vote || p.vote === "skip").length;
     const totalBallots = this.alive().length;
-    const maxN = Math.max(1, ...counts.map((r) => r.n));
-    const nameWidth = Math.max(9, ...counts.map((r) => r.name.length), "abstained".length);
 
-    const boardLines = [];
-    for (const row of counts) {
-      const isLeader = row.n === best && !tie;
-      const pct = Math.round((row.n / totalBallots) * 100);
-      const mark = isLeader ? c.red + "▸ " + c.reset : "  ";
-      boardLines.push(
-        `${mark}${c.bold}${row.name.padEnd(nameWidth)}${c.reset} ${bar(row.n, maxN, 16, isLeader ? c.red : c.magenta)} ${c.gray}${String(row.n).padStart(2)} vote${row.n === 1 ? " " : "s"} (${pct}%)${c.reset}`,
-      );
+    // The ballot becomes public once it's counted. It stays secret while
+    // people are voting, but afterwards the room can hold each other to
+    // it — and the bots quote it out loud the next morning.
+    this.ballots = record;
+
+    this.broadcast("\n" + screen([fitBig("VERDICT", c.magenta)]));
+    this.broadcast(center(c.gray + `DAY ${this.round}` + c.reset) + "\n");
+    await beat(900);
+
+    const rows = counts.map((row) => ({ name: row.name, n: row.n, leader: row.n === best && !tie }));
+    if (abstained) rows.push({ name: "skip", n: abstained, dim: true });
+    const boardLines = rows.length
+      ? voteBoard(rows, { total: totalBallots })
+      : [center(c.gray + "Nobody cast a ballot." + c.reset)];
+    // Row by row, so the bars fill in front of the room rather than
+    // arriving as a finished table.
+    for (const line of boardLines) {
+      this.broadcast(line);
+      await beat(280);
     }
-    if (abstained)
-      boardLines.push(
-        `  ${c.gray}${"abstained".padEnd(nameWidth)} ${bar(0, totalBallots, 16, c.gray)} ${String(abstained).padStart(2)}${c.gray}     (${Math.round((abstained / totalBallots) * 100)}%)${c.reset}`,
-      );
-    if (!boardLines.length) boardLines.push(c.gray + "Nobody cast a ballot." + c.reset);
-    this.broadcast("\n" + box(boardLines, c.magenta, `VERDICT — DAY ${this.round}`));
+    this.broadcast("");
+    this.broadcast(this.ballotLine(record));
+    await beat(1000);
 
     if (!top || tie) {
-      this.broadcast(c.gray + "  The room is split. No one hangs today." + c.reset);
+      this.broadcast("\n" + center(c.gray + "The room is split. No one hangs today." + c.reset) + "\n");
       this.log.push({ type: "vote", round: this.round, result: "no elimination", record });
       return;
     }
     const victim = this.players.find((p) => p.id === top);
     victim.alive = false;
+    this.broadcast("\n" + rule("", c.gray));
     this.broadcast(
-      c.bold + `  ${victim.name} is voted out (${best} votes).` + c.reset + "\n" + `  They were ${victim.role.color + c.bold + victim.role.name + c.reset}.`,
+      center(c.bold + `${victim.name} has been eliminated` + c.reset + c.gray + `  ·  ${best} vote${best === 1 ? "" : "s"}` + c.reset),
     );
+    await beat(1500);
+
+    // The reveal. This is the beat the whole day was built toward, so it
+    // gets its own screen rather than a trailing clause on the last line.
+    this.broadcast("\n" + center(c.gray + "\u2500\u2500  ROLE REVEAL  \u2500\u2500" + c.reset) + "\n");
+    await beat(800);
+    this.broadcast(fitBig(victim.role.name, victim.role.color));
+    const side =
+      victim.role.team === "mafia"
+        ? c.red + c.bold + "THEY WERE WITH THE MAFIA." + c.reset
+        : victim.role.team === "town"
+          ? c.green + c.bold + "THEY WERE TOWN." + c.reset
+          : c.yellow + c.bold + "THEY PLAYED FOR NOBODY BUT THEMSELVES." + c.reset;
+    this.broadcast("\n" + center(side));
+    this.broadcast(rule("", c.gray) + "\n");
+    await beat(1000);
+    this.publicRoles.add(victim.id);
     this.log.push({ type: "vote", round: this.round, result: `${victim.name} eliminated (${victim.role.name})`, record });
 
     if (victim.role.key === "jester") {
-      this.send(victim, "\n" + bigBanner("🎭 JESTER WINS", c.yellow) + "\n\n" + box([c.yellow + "You got exactly what you wanted." + c.reset], c.gray));
+      this.send(victim, "\n" + fitBig("JESTER WINS", c.yellow) + "\n\n" + box([c.yellow + "You got exactly what you wanted." + c.reset], c.gray));
       this.broadcast("\n" + c.yellow + c.bold + `  ${victim.name} was the Jester — they wanted this. 🎭` + c.reset);
       this.end("jester");
       return;
@@ -637,7 +988,7 @@ export class Game {
         this.players.map(
           (p) =>
             `${p.alive ? c.green + "●" + c.reset : c.gray + "✝" + c.reset} ${p.name.padEnd(12)} ${p.role.color + p.role.name + c.reset}` +
-            (p.isBot ? c.gray + "  ·bot" + c.reset : ""),
+            (p.isBot ? c.gray + `  ·bot (${personaFor(p.name).label})` + c.reset : ""),
         ),
         c.white,
       ),

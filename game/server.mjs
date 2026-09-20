@@ -92,6 +92,8 @@ function help(p) {
   if (game.phase === "night")
     lines.push(`${c.cyan}/kill${c.reset} ${c.cyan}/save${c.reset} ${c.cyan}/guard${c.reset} ${c.cyan}/check${c.reset} <name|number> — if your role allows it`);
   if (game.phase === "day") lines.push(`${c.cyan}/skip${c.reset}      ready to vote early`, `just type to speak`);
+  if (p.role?.team === "mafia" && game.phase !== "lobby" && game.phase !== "over")
+    lines.push(`${c.cyan}/m <message>${c.reset}  private channel — Mafia + Double Agent only`);
   if (game.phase === "vote") lines.push(`${c.cyan}/vote <name|number>${c.reset} or ${c.cyan}/vote skip${c.reset}`);
   if (game.phase === "over") lines.push(`${c.cyan}/restart${c.reset}   new match, same room (host)`);
   game.send(p, box(lines, c.gray));
@@ -199,6 +201,15 @@ function handleLine(p, raw) {
     return;
   }
 
+  // ---- mafia private channel (any live phase) ----
+  if (cmd === "/m") {
+    if (p.role?.team !== "mafia") return game.send(p, `${tag.warn} You don't have a private channel.`);
+    const text = arg.trim();
+    if (!text) return game.send(p, `${tag.warn} Say something: ${c.bold}/m <message>${c.reset}`);
+    game.toTeam("mafia", `  ${tag.mafia} ${c.red}${p.name}: ${text.slice(0, 200)}${c.reset}`);
+    return;
+  }
+
   // ---- night ----
   if (game.phase === "night") {
     const map = { "/kill": "mafia", "/save": "doctor", "/guard": "bodyguard", "/check": "detective" };
@@ -212,7 +223,7 @@ function handleLine(p, raw) {
       return;
     }
     if (cmd.startsWith("/")) return game.send(p, `${tag.warn} Unknown command. /help`);
-    if (p.role.key === "mafia") {
+    if (p.role.team === "mafia") {
       game.toTeam("mafia", `  ${tag.mafia} ${c.red}${p.name}: ${line.slice(0, 200)}${c.reset}`);
       return;
     }
@@ -234,6 +245,7 @@ function handleLine(p, raw) {
   // ---- vote ----
   if (game.phase === "vote") {
     if (cmd === "/vote" || !cmd.startsWith("/")) {
+      if (game.counting) return game.send(p, `${tag.warn} Too late — the ballots are being counted.`);
       if (p.vote) return game.send(p, `${tag.warn} You already voted.`);
       const target = cmd === "/vote" ? arg : line;
       if (target.toLowerCase() === "skip" || target.toLowerCase() === "abstain") {
