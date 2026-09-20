@@ -1,4 +1,4 @@
-import { c, rule, box, tag, banner } from "./ui.mjs";
+import { c, rule, box, tag, banner, bar, countdown, icon, bigBanner } from "./ui.mjs";
 import { ROLES, buildRoleDeck } from "./roles.mjs";
 import { botChat, botVote, botNightTarget, BOT_NAMES } from "./bots.mjs";
 
@@ -6,7 +6,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export const TIMINGS = {
   night: 45,
-  day: 90,
+  day: 60,
   vote: 45,
 };
 
@@ -90,7 +90,9 @@ export class Game {
   }
 
   toTeam(team, msg) {
-    this.broadcast(msg, (p) => p.alive && p.role?.team === team && p.role.key !== "double_agent");
+    // Double Agent shares team "mafia", so this already reaches both —
+    // that's intentional: Mafia and Double Agent are in on it together.
+    this.broadcast(msg, (p) => p.alive && p.role?.team === team);
   }
 
   toGhosts(msg) {
@@ -98,19 +100,30 @@ export class Game {
   }
 
   roster(forPlayer = null) {
+    const nameWidth = Math.max(8, ...this.players.map((p) => p.name.length));
     const lines = this.alive().map((p, i) => {
       const mark =
-        forPlayer && forPlayer.role?.key === "mafia" && p.role?.key === "mafia"
-          ? c.red + " ✖ mafia" + c.reset
+        forPlayer && forPlayer.role?.team === "mafia" && p.role?.team === "mafia"
+          ? p.role.key === "double_agent"
+            ? c.magenta + ` ${icon.mafia} agent` + c.reset
+            : c.red + ` ${icon.mafia} mafia` + c.reset
           : "";
-      const conn = p.connected ? "" : c.gray + " (disconnected)" + c.reset;
-      const bot = p.isBot ? c.gray + " ·bot" + c.reset : "";
-      return ` ${c.bold}${String(i + 1).padStart(2)}${c.reset}  ${p.name}${bot}${mark}${conn}`;
+      const dot = p.connected ? c.green + icon.alive + c.reset : c.gray + icon.offline + c.reset;
+      const bot = p.isBot ? c.gray + " " + icon.bot + "bot" + c.reset : "";
+      const votedFlag =
+        this.phase === "vote" ? (p.vote ? c.green + " " + icon.voted + c.reset : c.gray + " …" + c.reset) : "";
+      const host = p.isHost ? c.yellow + " " + icon.host + c.reset : "";
+      const name = p.name.padEnd(nameWidth);
+      return ` ${c.bold}${String(i + 1).padStart(2)}${c.reset} ${dot} ${name}${host}${bot}${mark}${votedFlag}`;
     });
-    const dead = this.dead().map((p) => c.gray + `  ✝  ${p.name} — ${p.role ? p.role.name : "?"}` + c.reset);
-    return [c.bold + "ALIVE" + c.reset, ...lines, ...(dead.length ? [c.gray + "DEAD" + c.reset, ...dead] : [])].join(
-      "\n",
+    const dead = this.dead().map(
+      (p) => c.gray + `    ${icon.dead}  ${p.name.padEnd(nameWidth)} ${p.role ? p.role.name : "?"}` + c.reset,
     );
+    return [
+      c.bold + `ALIVE (${this.alive().length})` + c.reset,
+      ...lines,
+      ...(dead.length ? [c.gray + `DEAD (${dead.length})` + c.reset, ...dead] : []),
+    ].join("\n");
   }
 
   /* ---------------- lobby ---------------- */
@@ -158,7 +171,13 @@ export class Game {
 
     for (const p of this.players) {
       if (p.isBot) continue;
-      const mates = this.players.filter((o) => o.role.key === "mafia" && o.id !== p.id).map((o) => o.name);
+      // Mafia and Double Agent share team "mafia" and know each other from the start.
+      const isConspirator = p.role.team === "mafia";
+      const mates = isConspirator
+        ? this.players
+            .filter((o) => o.id !== p.id && o.role.team === "mafia")
+            .map((o) => `${o.name} (${o.role.name})`)
+        : [];
       this.send(
         p,
         "\n" +
@@ -166,7 +185,7 @@ export class Game {
             [
               `You are ${p.role.color + c.bold + p.role.name.toUpperCase() + c.reset}`,
               c.gray + p.role.blurb + c.reset,
-              ...(p.role.key === "mafia"
+              ...(isConspirator
                 ? [
                     mates.length
                       ? c.red + "Your partners: " + mates.join(", ") + c.reset
@@ -217,7 +236,7 @@ export class Game {
       this._tick = setInterval(() => {
         left--;
         if (left === 30 || left === 15 || left === 5) {
-          this.broadcast(c.gray + `  … ${left}s remaining` + c.reset, (p) => p.connected);
+          this.broadcast(countdown(left, seconds), (p) => p.connected);
         }
         if (left <= 0 || isDone()) finish();
       }, 1000);
@@ -251,12 +270,17 @@ export class Game {
       if (p.role.key === "mafia") {
         this.send(
           p,
-          `\n${tag.mafia} Choose a target: ${c.bold}/kill <name|number>${c.reset}. Anything else you type is Mafia-only chat.`,
+          `\n${tag.mafia} Choose a target: ${c.bold}/kill <name|number>${c.reset}. Anything else you type reaches your partners — Mafia and Double Agent — privately.`,
         );
       } else if (p.role.key === "detective") {
         this.send(p, `\n${tag.night} Investigate someone: ${c.bold}/check <name|number>${c.reset}`);
       } else if (p.role.key === "doctor") {
         this.send(p, `\n${tag.night} Protect someone: ${c.bold}/save <name|number>${c.reset}`);
+      } else if (p.role.key === "double_agent") {
+        this.send(
+          p,
+          `\n${tag.night} No kill of your own tonight — but anything you type reaches your Mafia partners privately. Use the day to work out who the Detective is.`,
+        );
       } else {
         this.send(p, `\n${tag.night} You sleep. Listen to the silence.`);
       }
@@ -340,7 +364,16 @@ export class Game {
       this.broadcast(
         c.red + c.bold + `  ${victim.name} is dead.` + c.reset + c.gray + `  They were a ${victim.role.name}.` + c.reset,
       );
-      this.send(victim, "\n" + box([c.red + "You were killed in the night." + c.reset, c.gray + "You are now a spectator. You can see everything — the living cannot hear you." + c.reset], c.gray));
+      this.send(
+        victim,
+        "\n" +
+          bigBanner("YOU DIED", c.red) +
+          "\n\n" +
+          box(
+            [c.red + "You were killed in the night." + c.reset, c.gray + "You are now a spectator. You can see everything — the living cannot hear you." + c.reset],
+            c.gray,
+          ),
+      );
       this.log.push({ type: "night", round: this.round, result: `${victim.name} killed (${victim.role.name})` });
     }
   }
@@ -356,6 +389,13 @@ export class Game {
     );
     this.broadcast("\n" + this.roster());
     this.skipVotes = new Set();
+
+    for (const p of this.alive().filter((x) => x.role.team === "mafia")) {
+      this.send(
+        p,
+        `${tag.mafia} Private channel is open: ${c.bold}/m <message>${c.reset} reaches only your Mafia + Double Agent partners — the town can't see it.`,
+      );
+    }
 
     const bots = this.alive().filter((p) => p.isBot);
     for (const b of bots) {
@@ -417,7 +457,11 @@ export class Game {
   castVote(voter, target) {
     voter.vote = target === "skip" ? "skip" : target.id;
     const label = target === "skip" ? c.gray + "abstain" + c.reset : c.bold + target.name + c.reset;
-    this.broadcast(`  ${c.magenta}▸${c.reset} ${voter.name} votes ${label}`);
+    // Secret ballot: only the voter learns who they picked.
+    this.send(voter, `  ${c.magenta}▸${c.reset} ${c.gray}Your vote is locked in:${c.reset} ${label}`);
+    const cast = this.alive().filter((p) => p.vote).length;
+    const total = this.alive().length;
+    this.broadcast(`  ${c.magenta}▸${c.reset} ${bar(cast, total, 14, c.magenta)} ${c.gray}${cast}/${total} ballots in${c.reset}`);
     return true;
   }
 
@@ -441,7 +485,31 @@ export class Game {
       } else if (n === best) tie = true;
     }
 
-    this.broadcast("\n" + rule("VERDICT", c.magenta));
+    // Counts only — never who voted for whom.
+    const counts = Object.entries(tally)
+      .map(([id, n]) => ({ name: this.players.find((x) => x.id === Number(id))?.name, n }))
+      .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
+    const abstained = this.alive().filter((p) => !p.vote || p.vote === "skip").length;
+    const totalBallots = this.alive().length;
+    const maxN = Math.max(1, ...counts.map((r) => r.n));
+    const nameWidth = Math.max(9, ...counts.map((r) => r.name.length), "abstained".length);
+
+    const boardLines = [];
+    for (const row of counts) {
+      const isLeader = row.n === best && !tie;
+      const pct = Math.round((row.n / totalBallots) * 100);
+      const mark = isLeader ? c.red + "▸ " + c.reset : "  ";
+      boardLines.push(
+        `${mark}${c.bold}${row.name.padEnd(nameWidth)}${c.reset} ${bar(row.n, maxN, 16, isLeader ? c.red : c.magenta)} ${c.gray}${String(row.n).padStart(2)} vote${row.n === 1 ? " " : "s"} (${pct}%)${c.reset}`,
+      );
+    }
+    if (abstained)
+      boardLines.push(
+        `  ${c.gray}${"abstained".padEnd(nameWidth)} ${bar(0, totalBallots, 16, c.gray)} ${String(abstained).padStart(2)}${c.gray}     (${Math.round((abstained / totalBallots) * 100)}%)${c.reset}`,
+      );
+    if (!boardLines.length) boardLines.push(c.gray + "Nobody cast a ballot." + c.reset);
+    this.broadcast("\n" + box(boardLines, c.magenta, `VERDICT — DAY ${this.round}`));
+
     if (!top || tie) {
       this.broadcast(c.gray + "  The room is split. No one hangs today." + c.reset);
       this.log.push({ type: "vote", round: this.round, result: "no elimination", record });
@@ -452,7 +520,13 @@ export class Game {
     this.broadcast(
       c.bold + `  ${victim.name} is voted out (${best} votes).` + c.reset + "\n" + `  They were ${victim.role.color + c.bold + victim.role.name + c.reset}.`,
     );
-    this.send(victim, "\n" + box([c.yellow + "The town turned on you." + c.reset, c.gray + "You are now a spectator." + c.reset], c.gray));
+    this.send(
+      victim,
+      "\n" +
+        bigBanner("ELIMINATED", c.yellow) +
+        "\n\n" +
+        box([c.yellow + "The town turned on you." + c.reset, c.gray + "You are now a spectator." + c.reset], c.gray),
+    );
     this.log.push({ type: "vote", round: this.round, result: `${victim.name} eliminated (${victim.role.name})`, record });
   }
 
@@ -474,7 +548,17 @@ export class Game {
         ? c.green + c.bold + "  TOWN WINS — every Mafia has been buried." + c.reset
         : c.red + c.bold + "  MAFIA WINS — they outnumber the living town." + c.reset;
     this.broadcast("\n" + rule("GAME OVER", winner === "town" ? c.green : c.red));
+    this.broadcast("\n" + bigBanner(`${winner === "town" ? "TOWN" : "MAFIA"} WINS`, winner === "town" ? c.green : c.red) + "\n");
     this.broadcast(win + "\n");
+
+    // Personalized verdict — everyone still in a team finds out on their own screen
+    // whether their side won, before the shared roster/history recap below.
+    for (const p of this.players) {
+      if (p.isBot || !p.role || p.role.team === "none") continue;
+      const wonIt = p.role.team === winner;
+      this.send(p, "\n" + bigBanner(wonIt ? "YOU WIN" : "YOU LOSE", wonIt ? c.green : c.red) + "\n");
+    }
+
     this.broadcast(
       box(
         this.players.map(

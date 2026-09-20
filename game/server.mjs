@@ -87,7 +87,10 @@ function help(p) {
     );
   if (game.phase === "night")
     lines.push(`${c.cyan}/kill${c.reset} ${c.cyan}/save${c.reset} ${c.cyan}/check${c.reset} <name|number> — if your role allows it`);
-  if (game.phase === "day") lines.push(`${c.cyan}/skip${c.reset}      ready to vote early`, `just type to speak`);
+  if (game.phase === "day") {
+    lines.push(`${c.cyan}/skip${c.reset}      ready to vote early`, `just type to speak`);
+    if (p.role?.team === "mafia") lines.push(`${c.cyan}/m <message>${c.reset}  private chat with Mafia + Double Agent only`);
+  }
   if (game.phase === "vote") lines.push(`${c.cyan}/vote <name|number>${c.reset} or ${c.cyan}/vote skip${c.reset}`);
   if (game.phase === "over") lines.push(`${c.cyan}/restart${c.reset}   new match, same room (host)`);
   game.send(p, box(lines, c.gray));
@@ -203,13 +206,13 @@ function handleLine(p, raw) {
       if (p.role.key !== map[cmd]) return game.send(p, `${tag.warn} That isn't your power.`);
       const t = game.byName(arg);
       if (!t || !t.alive) return game.send(p, `${tag.warn} No living player called "${arg}". Try /players.`);
-      if (cmd === "/kill" && t.role.key === "mafia") return game.send(p, `${tag.warn} That's your own partner.`);
+      if (cmd === "/kill" && t.role.team === "mafia") return game.send(p, `${tag.warn} That's your own partner.`);
       const ok = game.applyNightAction(p, t);
       if (ok) game.nudge();
       return;
     }
     if (cmd.startsWith("/")) return game.send(p, `${tag.warn} Unknown command. /help`);
-    if (p.role.key === "mafia") {
+    if (p.role.key === "mafia" || p.role.key === "double_agent") {
       game.toTeam("mafia", `  ${tag.mafia} ${c.red}${p.name}: ${line.slice(0, 200)}${c.reset}`);
       return;
     }
@@ -222,6 +225,12 @@ function handleLine(p, raw) {
       game.skipVotes.add(p.id);
       game.broadcast(`${tag.day} ${p.name} is ready to vote (${game.skipVotes.size}/${game.alive().filter((x) => !x.isBot && x.connected).length}).`);
       game.nudge();
+      return;
+    }
+    if (cmd === "/m") {
+      if (p.role.team !== "mafia") return game.send(p, `${tag.warn} You don't have a private channel.`);
+      if (!arg) return game.send(p, `${tag.warn} Usage: /m <message>`);
+      game.toTeam("mafia", `  ${tag.mafia} ${c.red}[private] ${p.name}: ${arg.slice(0, 200)}${c.reset}`);
       return;
     }
     if (cmd.startsWith("/")) return game.send(p, `${tag.warn} Unknown command. /help`);

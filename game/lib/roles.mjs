@@ -14,7 +14,8 @@ export const ROLES = {
     name: "Mafia",
     team: "mafia",
     color: c.red,
-    blurb: "Each night you and your partners pick one player to eliminate. By day, lie beautifully.",
+    blurb:
+      "Each night you and your partners pick one player to eliminate. Your Double Agent partner works the room by day, hunting for the Detective — listen to what they whisper you. By day, lie beautifully.",
     night: "kill",
   },
   detective: {
@@ -39,7 +40,7 @@ export const ROLES = {
     team: "mafia",
     color: c.magenta,
     blurb:
-      "You win with the Mafia, but you do NOT know who they are — and they do not know you. You read CLEAN to the Detective.",
+      "You win with the Mafia — and now they know you, and you know them. You have no kill of your own, but you have a job: figure out who the Detective is from how people talk and vote, then use your private channel to tip off your partners so they can target the right person. You still read CLEAN to Detective checks, which makes you the safest cover in the room.",
     night: null,
   },
 };
