@@ -29,37 +29,43 @@ export const icon = {
   skull: "☠",
 };
 
-// Compact 5-row block font — just the letters our banners need
+// Chunky 7-row block font — just the letters our banners need
 // (YOU DIED, TOWN/MAFIA WINS, YOU WIN/LOSE, ELIMINATED) rather than a
 // full A–Z set, so every glyph below is deliberate and hand-checked.
+// Styled to echo the title banner's two-tone look (bright on top,
+// fading to gray) without copying its exact box-drawn letterforms.
 const BIG_FONT = {
-  " ": ["    ", "    ", "    ", "    ", "    "],
-  A: [" ██ ", "█  █", "████", "█  █", "█  █"],
-  D: ["███ ", "█  █", "█  █", "█  █", "███ "],
-  E: ["████", "█   ", "███ ", "█   ", "████"],
-  F: ["████", "█   ", "███ ", "█   ", "█   "],
-  I: ["███", " █ ", " █ ", " █ ", "███"],
-  L: ["█   ", "█   ", "█   ", "█   ", "████"],
-  M: ["█   █", "██ ██", "█ █ █", "█   █", "█   █"],
-  N: ["█   █", "██  █", "█ █ █", "█  ██", "█   █"],
-  O: [" ██ ", "█  █", "█  █", "█  █", " ██ "],
-  S: [" ███", "█   ", " ██ ", "   █", "███ "],
-  T: ["█████", "  █  ", "  █  ", "  █  ", "  █  "],
-  U: ["█  █", "█  █", "█  █", "█  █", " ██ "],
-  W: ["█   █", "█   █", "█ █ █", "██ ██", "█   █"],
-  Y: ["█   █", " █ █ ", "  █  ", "  █  ", "  █  "],
+  " ": ["     ", "     ", "     ", "     ", "     ", "     ", "     "],
+  A: ["  ██  ", " ████ ", "██  ██", "██  ██", "██████", "██  ██", "██  ██"],
+  D: ["█████ ", "██  ██", "██  ██", "██  ██", "██  ██", "██  ██", "█████ "],
+  E: ["██████", "██    ", "██    ", "█████ ", "██    ", "██    ", "██████"],
+  F: ["██████", "██    ", "██    ", "█████ ", "██    ", "██    ", "██    "],
+  I: ["████", " ██ ", " ██ ", " ██ ", " ██ ", " ██ ", "████"],
+  L: ["██    ", "██    ", "██    ", "██    ", "██    ", "██    ", "██████"],
+  M: ["██   ██", "███ ███", "███████", "██ █ ██", "██   ██", "██   ██", "██   ██"],
+  N: ["██   █", "███  █", "██ █ █", "██  ██", "██   █", "██   █", "██   █"],
+  O: [" ████ ", "██  ██", "██  ██", "██  ██", "██  ██", "██  ██", " ████ "],
+  S: [" █████", "██    ", "██    ", " ████ ", "    ██", "    ██", "█████ "],
+  T: ["███████", "   █   ", "   █   ", "   █   ", "   █   ", "   █   ", "   █   "],
+  U: ["██  ██", "██  ██", "██  ██", "██  ██", "██  ██", "██  ██", " ████ "],
+  W: ["██   ██", "██   ██", "██   ██", "██ █ ██", "███████", "███ ███", "██   ██"],
+  Y: ["██   ██", " ██ ██ ", "  ███  ", "   █   ", "   █   ", "   █   ", "   █   "],
 };
 
-// Renders text as 5 rows of block-letter ASCII art. Only covers the
+// Renders text as tall block letters, with the top ~60% of rows in the
+// requested color and the bottom rows fading to gray — the same
+// bright-to-gray gradient the title banner uses. Only covers the
 // letters in BIG_FONT above — unsupported characters fall back to a
 // blank space so a typo never crashes the game, it just leaves a gap.
 export function bigText(text, color = c.white) {
-  const rows = ["", "", "", "", ""];
+  const rowCount = BIG_FONT[" "].length;
+  const rows = Array.from({ length: rowCount }, () => "");
   for (const ch of String(text).toUpperCase()) {
     const glyph = BIG_FONT[ch] || BIG_FONT[" "];
-    for (let i = 0; i < 5; i++) rows[i] += glyph[i] + " ";
+    for (let i = 0; i < rowCount; i++) rows[i] += glyph[i] + " ";
   }
-  return rows.map((r) => color + c.bold + r.replace(/ +$/, "") + c.reset);
+  const fadeAt = Math.ceil(rowCount * 0.6);
+  return rows.map((r, i) => (i < fadeAt ? color + c.bold : c.gray) + r.replace(/ +$/, "") + c.reset);
 }
 
 // Same as bigText, but centered as a single block — the shape used for
@@ -117,6 +123,55 @@ export function box(lines, color = c.cyan, title = "") {
   }
   out.push(color + "╰" + "─".repeat(width) + "╯" + c.reset);
   return out.join("\n");
+}
+
+// Double-ruled box, used for the lobby screen so it reads as a distinct
+// "screen" rather than another inline notice.
+export function heavyBox(lines, color = c.cyan, title = "") {
+  const width = 46;
+  const centered = (t) => {
+    const pad = Math.max(0, width - vlen(t));
+    const left = Math.floor(pad / 2);
+    return " ".repeat(left) + t + " ".repeat(pad - left);
+  };
+  const out = [color + "╔" + "═".repeat(width) + "╗" + c.reset];
+  if (title) {
+    out.push(color + "║" + c.reset + c.bold + centered(title) + c.reset + color + "║" + c.reset);
+    out.push(color + "╠" + "═".repeat(width) + "╣" + c.reset);
+  }
+  for (const line of lines) {
+    out.push(color + "║ " + c.reset + line + " ".repeat(Math.max(0, width - 2 - vlen(line))) + color + " ║" + c.reset);
+  }
+  out.push(color + "╚" + "═".repeat(width) + "╝" + c.reset);
+  return out.join("\n");
+}
+
+// The lobby screen. This is the first thing anyone sees, so it carries the
+// room code, who's in, who's the host, which players are bots, and whether
+// the game can start yet — at a glance, with no commands to run.
+export function lobbyScreen({ room, players, min }) {
+  const nameWidth = Math.max(10, ...players.map((p) => p.name.length));
+  const rows = players.map((p) => {
+    const dot = p.isBot ? c.gray + icon.bot + c.reset : p.connected ? c.green + icon.alive + c.reset : c.gray + icon.offline + c.reset;
+    const label = p.isHost ? c.yellow + "HOST" + c.reset : p.isBot ? c.gray + "BOT" + c.reset : "";
+    return `${dot} ${c.bold}${p.name.padEnd(nameWidth)}${c.reset}  ${label}`;
+  });
+  const short = Math.max(0, min - players.length);
+  const status = short
+    ? c.yellow + `${players.length} PLAYER${players.length === 1 ? "" : "S"} — NEED ${short} MORE` + c.reset
+    : c.green + c.bold + `${players.length} PLAYERS — READY` + c.reset;
+  return heavyBox(
+    [
+      `${c.gray}ROOM${c.reset}  ${c.bold}${c.cyan}${room}${c.reset}`,
+      "",
+      c.gray + "PLAYERS" + c.reset,
+      ...rows,
+      "",
+      status,
+    ],
+    c.cyan,
+    "TERMINAL MAFIA",
+  );
 }
 
 // A small inline meter, e.g. bar(3, 5) -> "███░░". Handy for vote tallies

@@ -4,11 +4,15 @@
 import net from "node:net";
 import os from "node:os";
 import { Game } from "./lib/game.mjs";
-import { c, rule, box, tag, banner } from "./lib/ui.mjs";
+import { c, rule, box, tag, banner, lobbyScreen } from "./lib/ui.mjs";
 import { loadMatches, recordMatch } from "./lib/history.mjs";
 
 const PORT = Number(process.argv[2] || process.env.PORT || 5555);
 const MIN_PLAYERS = 4;
+
+// A short room code so players on a LAN can confirm they're all in the same
+// game, and so judges have something concrete to read off the screen.
+const ROOM = (process.env.MAFIA_ROOM || Math.random().toString(16).slice(2, 6)).toUpperCase().padEnd(4, "0").slice(0, 4);
 
 function freshGame() {
   const g = new Game();
@@ -86,22 +90,18 @@ function help(p) {
       `${c.cyan}/start${c.reset}     begin the game (host, ${MIN_PLAYERS}+ players)`,
     );
   if (game.phase === "night")
-    lines.push(`${c.cyan}/kill${c.reset} ${c.cyan}/save${c.reset} ${c.cyan}/check${c.reset} <name|number> — if your role allows it`);
-  if (game.phase === "day") {
-    lines.push(`${c.cyan}/skip${c.reset}      ready to vote early`, `just type to speak`);
-    if (p.role?.team === "mafia") lines.push(`${c.cyan}/m <message>${c.reset}  private chat with Mafia + Double Agent only`);
-  }
+    lines.push(`${c.cyan}/kill${c.reset} ${c.cyan}/save${c.reset} ${c.cyan}/guard${c.reset} ${c.cyan}/check${c.reset} <name|number> — if your role allows it`);
+  if (game.phase === "day") lines.push(`${c.cyan}/skip${c.reset}      ready to vote early`, `just type to speak`);
   if (game.phase === "vote") lines.push(`${c.cyan}/vote <name|number>${c.reset} or ${c.cyan}/vote skip${c.reset}`);
   if (game.phase === "over") lines.push(`${c.cyan}/restart${c.reset}   new match, same room (host)`);
   game.send(p, box(lines, c.gray));
 }
 
 function lobbyStatus() {
-  const names = game.players.map((p) => p.name + (p.isBot ? c.gray + "·bot" + c.reset : "")).join(", ");
-  game.broadcast(
-    `${tag.sys} Lobby (${game.players.length}): ${names}` +
-      (game.players.length < MIN_PLAYERS ? c.gray + `  — need ${MIN_PLAYERS - game.players.length} more` : ""),
-  );
+  game.broadcast("\n" + lobbyScreen({ room: ROOM, players: game.players, min: MIN_PLAYERS }));
+  const host = game.host();
+  if (host && game.players.length >= MIN_PLAYERS)
+    game.send(host, `${tag.sys} ${c.bold}/start${c.reset} when everyone's ready.`);
 }
 
 function startGame() {
@@ -201,18 +201,18 @@ function handleLine(p, raw) {
 
   // ---- night ----
   if (game.phase === "night") {
-    const map = { "/kill": "mafia", "/save": "doctor", "/check": "detective" };
+    const map = { "/kill": "mafia", "/save": "doctor", "/guard": "bodyguard", "/check": "detective" };
     if (map[cmd]) {
       if (p.role.key !== map[cmd]) return game.send(p, `${tag.warn} That isn't your power.`);
       const t = game.byName(arg);
       if (!t || !t.alive) return game.send(p, `${tag.warn} No living player called "${arg}". Try /players.`);
-      if (cmd === "/kill" && t.role.team === "mafia") return game.send(p, `${tag.warn} That's your own partner.`);
+      if (cmd === "/kill" && t.role.key === "mafia") return game.send(p, `${tag.warn} That's your own partner.`);
       const ok = game.applyNightAction(p, t);
       if (ok) game.nudge();
       return;
     }
     if (cmd.startsWith("/")) return game.send(p, `${tag.warn} Unknown command. /help`);
-    if (p.role.key === "mafia" || p.role.key === "double_agent") {
+    if (p.role.key === "mafia") {
       game.toTeam("mafia", `  ${tag.mafia} ${c.red}${p.name}: ${line.slice(0, 200)}${c.reset}`);
       return;
     }
@@ -225,12 +225,6 @@ function handleLine(p, raw) {
       game.skipVotes.add(p.id);
       game.broadcast(`${tag.day} ${p.name} is ready to vote (${game.skipVotes.size}/${game.alive().filter((x) => !x.isBot && x.connected).length}).`);
       game.nudge();
-      return;
-    }
-    if (cmd === "/m") {
-      if (p.role.team !== "mafia") return game.send(p, `${tag.warn} You don't have a private channel.`);
-      if (!arg) return game.send(p, `${tag.warn} Usage: /m <message>`);
-      game.toTeam("mafia", `  ${tag.mafia} ${c.red}[private] ${p.name}: ${arg.slice(0, 200)}${c.reset}`);
       return;
     }
     if (cmd.startsWith("/")) return game.send(p, `${tag.warn} Unknown command. /help`);
@@ -341,9 +335,18 @@ const server = net.createServer((socket) => {
     if (!cur) return;
     cur.connected = false;
     cur.socket = null;
+    // Hand the host badge to someone still present, in ANY phase. Without
+    // this, a host who drops mid-match leaves nobody able to /restart.
+    if (cur.isHost) {
+      const heir = game.players.find((x) => !x.isBot && x.connected && x.id !== cur.id);
+      if (heir) {
+        cur.isHost = false;
+        heir.isHost = true;
+        game.send(heir, `${tag.sys} ${c.yellow}You are now the host.${c.reset}`);
+      }
+    }
     if (game.phase === "lobby") {
       game.players = game.players.filter((x) => x.id !== cur.id);
-      if (cur.isHost && game.humans()[0]) game.humans()[0].isHost = true;
       game.broadcast(`${tag.sys} ${cur.name} left the lobby.`);
       lobbyStatus();
     } else {
@@ -365,7 +368,7 @@ server.on("error", (err) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(banner());
   console.log(box([
-    c.bold + "Server listening" + c.reset,
+    c.bold + "Server listening" + c.reset + `   ${c.gray}room${c.reset} ${c.bold}${c.cyan}${ROOM}${c.reset}`,
     "",
     ...lanAddresses().map((ip) => `  ${c.cyan}node game/client.mjs ${ip} ${PORT}${c.reset}`),
     `  ${c.gray}same machine:${c.reset} node game/client.mjs`,

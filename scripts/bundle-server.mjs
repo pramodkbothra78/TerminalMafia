@@ -25,6 +25,17 @@ function stripLocalImports(src) {
   // concatenation everything is in one shared top-level scope already.
   return src.replace(/^import\s*\{[^}]*\}\s*from\s*["']\.\/[^"']+["'];?\s*$/gm, "");
 }
+function convertNodeImportsToCommonJS(src) {
+  return src
+    .replace(
+      /^import\s+([A-Za-z_$][\w$]*)\s+from\s+["'](node:[^"']+)["'];?\s*$/gm,
+      'const $1 = require("$2");'
+    )
+    .replace(
+      /^import\s*\{([^}]+)\}\s*from\s+["'](node:[^"']+)["'];?\s*$/gm,
+      'const {$1} = require("$2");'
+    );
+}
 
 function stripExportKeyword(src) {
   // `export const X = ...` -> `const X = ...`
@@ -39,9 +50,12 @@ function stripShebang(src) {
 
 function readAndTransform(filePath) {
   const raw = fs.readFileSync(filePath, "utf8");
-  return stripExportKeyword(stripLocalImports(stripShebang(raw)));
+  return stripExportKeyword(
+    convertNodeImportsToCommonJS(
+      stripLocalImports(stripShebang(raw))
+    )
+  );
 }
-
 function build() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
 

@@ -36,10 +36,19 @@ const FILLER = [
   "counting: we can't afford a mislynch.",
   "i'm listening.",
 ];
+const JESTER_BAIT = [
+  "honestly? vote me. i dare you.",
+  "i've got nothing to say in my defense.",
+  "sure, put me up. see what happens.",
+  "i wouldn't trust me either.",
+];
 
 export function botChat(bot, game) {
   const others = game.alive().filter((p) => p.id !== bot.id);
   if (!others.length) return null;
+  // The Jester wants the noose, not an alibi — bait the room instead of
+  // playing it safe like a normal townsperson would.
+  if (bot.role.key === "jester" && Math.random() < 0.35) return pick(JESTER_BAIT);
   const roll = Math.random();
   if (roll < 0.55) {
     const target =
@@ -79,6 +88,13 @@ export function botNightTarget(bot, game) {
     if (Math.random() < 0.3 && !bot.selfSaved) return bot;
     const others = alive.filter((p) => p.id !== bot.id);
     return others.length ? pick(others) : bot;
+  }
+  if (bot.role.key === "bodyguard") {
+    // Can't guard self — lean toward whoever looks most under threat.
+    const others = alive.filter((p) => p.id !== bot.id);
+    if (!others.length) return null;
+    others.sort((a, b) => (game.suspicion[a.id] || 0) - (game.suspicion[b.id] || 0));
+    return Math.random() < 0.6 ? others[0] : pick(others);
   }
   if (bot.role.key === "detective") {
     const unchecked = alive.filter((p) => p.id !== bot.id && !bot.checked?.has(p.id));

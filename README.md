@@ -49,10 +49,29 @@ Either way you get `dist/terminal-mafia-server` and `dist/terminal-mafia-client`
 | Villager | Town | None. Read people. |
 | Detective | Town | Investigates one player each night: MAFIA or CLEAN |
 | Doctor | Town | Protects one player each night; may self-protect once per game |
+| Bodyguard | Town | Guards one *other* player each night. If the Mafia attacks that player, the Bodyguard dies in their place — the target survives |
 | Mafia | Mafia | Kills one player each night; has a private night chat |
-| Double Agent | Mafia | Wins with Mafia, reads CLEAN, but doesn't know who the Mafia are — and they don't know them |
+| Double Agent | Mafia | Wins with Mafia and knows them, but has no kill. Reads **CLEAN** to the Detective — the safest cover in the room |
+| Jester | Neutral | No powers, no allies. Wins **alone and instantly** if the town votes them out — everyone else's game keeps going |
 
-Role table scales with lobby size (kept low on purpose so you see the special roles without needing a full 8-player lobby): 1 Mafia at 2+, Detective at 3+, Doctor at 4+, Double Agent at 5+, 2nd Mafia at 7+, 3rd at 11+.
+The Mafia team is always about one third of the room (`floor(n/3)`), and the
+Double Agent **occupies** a Mafia slot rather than adding one. This guarantees
+the town still outnumbers the Mafia after the first night kill, so no match can
+be decided before anyone has spoken. The deck is validated at deal time and a
+game that would start at (or one kill from) Mafia parity is refused outright.
+The Jester is neutral and is never counted as Town for that balance check —
+only Bodyguard, Doctor, Detective and Villager are.
+
+| Players | Mafia team | Town | Roles |
+| --- | --- | --- | --- |
+| 4–5 | 1 | 3–4 | Mafia, Detective, Doctor, Villagers |
+| 6 | 2 | 4 | Mafia, Double Agent, Detective, Doctor, Villagers |
+| 7–8 | 2 | 4–5 | Mafia, Double Agent, Detective, Doctor, Bodyguard, Jester, Villagers |
+| 9–11 | 3 | 5–7 | 2× Mafia, Double Agent, Detective, Doctor, Bodyguard, Jester, Villagers |
+| 12 | 4 | 7 | 3× Mafia, Double Agent, Detective, Doctor, Bodyguard, Jester, Villagers |
+
+(Jester counts as neither Town nor Mafia once dealt, which is why it waits
+for 7 players — at 6 it would quietly eat the town's safety margin.)
 
 For local testing with fewer than 4 players, the host can force-start with `/start force` — the game will still assign roles and run, but this is for testing only; the challenge spec requires 4+ players for a real match.
 
@@ -66,6 +85,7 @@ For local testing with fewer than 4 players, the host can force-start with `/sta
 
 - Town wins when every Mafia-team player is dead.
 - Mafia wins when Mafia-team players equal or outnumber the remaining Town.
+- Jester wins instantly, alone, the moment the town votes them out — the match ends right there, regardless of who else was still alive.
 
 ## Commands
 
@@ -76,6 +96,7 @@ For local testing with fewer than 4 players, the host can force-start with `/sta
 | `/bots <n>` `/start` `/start force` | lobby, host only (`force` bypasses the 4-player minimum, for testing) |
 | `/kill <name\|#>` | night, Mafia (plain text = mafia-only chat) |
 | `/save <name\|#>` | night, Doctor |
+| `/guard <name\|#>` | night, Bodyguard (can't target yourself) |
 | `/check <name\|#>` | night, Detective |
 | plain text, `/skip` | day discussion |
 | `/vote <name\|#>` `/vote skip` | voting |
@@ -89,8 +110,56 @@ Targets accept a name, a name prefix, or the number shown in the roster.
 - **Invalid input**: unknown commands, bad targets, dead targets and duplicate votes all get a friendly `[!]` message; nothing crashes the round.
 - **Late joiners**: anyone connecting mid-match joins as a spectator.
 
+## Testing
+
+```bash
+npm test                  # full suite, ~5 minutes
+npm test disconnect       # run only tests whose name matches
+```
+
+35 automated tests drive a **real server over real TCP sockets** — nothing is
+mocked. Every test asserts that the server process produced no stderr output
+and never exited, on top of its gameplay assertions.
+
+Coverage:
+
+| Area | Tests |
+| --- | --- |
+| Full matches | 4, 5, 6, 7 and 8 players, all-human |
+| Bot/human mixes | 1h+5b, 3h+4b, 2h+6b |
+| Role mechanics | Doctor save, self-protect limit, Detective MAFIA/CLEAN reads, Double Agent reading CLEAN, two Mafia on one target |
+| Win conditions | Mafia lynched → Town wins; Mafia parity → Mafia wins; tied vote → no elimination |
+| Bad input | invalid/duplicate/oversized names, invalid vote targets, duplicate votes, dead-player commands, 22 kinds of junk fired at every phase |
+| Lobby screen | render, bot marking, readiness at the 4-player minimum, redraw on departure |
+| Bot personalities | stable assignment, all four types in use, dialogue variety, reaction to deaths, personality shown in the final reveal |
+| Resilience | disconnect during night, disconnect during voting, host handover, reconnect restores role, reconnect mid-vote, all humans leaving at once |
+| Lifecycle | `/restart` second match, history persistence and replay |
+
+The suite is regression-proofed: it was verified by deliberately reintroducing
+four bugs (unbalanced deck, missing duplicate-vote guard, inverted tie
+detection, missing dead-player block) and confirming the relevant test failed
+each time.
+
+Phase lengths and role assignment can be pinned via environment variables so
+scenarios are reproducible:
+
+```bash
+MAFIA_NIGHT=4 MAFIA_DAY=2 MAFIA_VOTE=4 \
+MAFIA_ROLES="alpha=mafia,bravo=doctor,charlie=detective" \
+node game/server.mjs
+```
+
+`MAFIA_DATA_DIR` relocates the match-history file, which matters for the
+standalone executable.
+
 ## Extras
 
-- **AI bots** — heuristic bot players chat, accuse, vote and use night powers with human-like delays.
+- **AI bots with personalities** — four temperaments (analytical, aggressive,
+  defensive, chaotic), fixed per codename so `grim` always shouts and `juno`
+  always slows the room down. Personality changes what a bot says, who it
+  suspects, how predictably it votes, and how it uses night powers: an
+  aggressive mafioso silences the loudest player, a quiet one kills whoever
+  nobody is watching. Bots also react by name to the previous night's death
+  or save. No LLM, no API keys — it all runs inside the server.
 - **Spectator mode** — eliminated players see everything, including a ghost-only chat channel.
 - **Match history** — every game ends with a full role reveal plus the night results and per-day voting record, and it's saved permanently to `data/match-history.json`. Type `/history` any time (lobby, mid-game as a spectator, or after the match) to see every game ever played on this server, and `/history <#>` to replay a specific one — roles, night kills/saves, and every vote. History survives server restarts.

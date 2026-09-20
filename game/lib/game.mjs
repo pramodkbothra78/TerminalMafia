@@ -4,11 +4,25 @@ import { botChat, botVote, botNightTarget, BOT_NAMES } from "./bots.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Phase lengths can be compressed via env vars — used by the test suite to
+// run a full match in seconds instead of minutes.
 export const TIMINGS = {
-  night: 45,
-  day: 60,
-  vote: 45,
+  night: Number(process.env.MAFIA_NIGHT) || 45,
+  day: Number(process.env.MAFIA_DAY) || 60,
+  vote: Number(process.env.MAFIA_VOTE) || 45,
 };
+
+// Pins specific players to specific roles for reproducible test scenarios,
+// e.g. MAFIA_ROLES="alpha=mafia,bravo=doctor,charlie=detective,delta=villager".
+// Never used in a real match — only the harness sets this env var.
+function parsePinnedRoles(str) {
+  const map = {};
+  for (const pair of str.split(",")) {
+    const [name, role] = pair.split("=").map((s) => s?.trim().toLowerCase());
+    if (name && role) map[name] = role;
+  }
+  return map;
+}
 
 let nextId = 1;
 
@@ -144,10 +158,17 @@ export class Game {
   /* ---------------- lifecycle ---------------- */
 
   async start() {
-    const deck = buildRoleDeck(this.players.length);
-    for (let i = deck.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [deck[i], deck[j]] = [deck[j], deck[i]];
+    const pinnedStr = process.env.MAFIA_ROLES;
+    let deck;
+    if (pinnedStr) {
+      const map = parsePinnedRoles(pinnedStr);
+      deck = this.players.map((p) => (ROLES[map[p.name.toLowerCase()]] ? map[p.name.toLowerCase()] : "villager"));
+    } else {
+      deck = buildRoleDeck(this.players.length);
+      for (let i = deck.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [deck[i], deck[j]] = [deck[j], deck[i]];
+      }
     }
     this.players.forEach((p, i) => {
       p.role = ROLES[deck[i]];
@@ -256,7 +277,7 @@ export class Game {
   async night() {
     this.phase = "night";
     this.round++;
-    this.actions = { mafiaVotes: {}, save: null, check: null };
+    this.actions = { mafiaVotes: {}, save: null, check: null, guard: null };
     this.players.forEach((p) => (p.acted = false));
 
     this.broadcast("\n" + rule(`NIGHT ${this.round}`, c.blue));
@@ -276,6 +297,8 @@ export class Game {
         this.send(p, `\n${tag.night} Investigate someone: ${c.bold}/check <name|number>${c.reset}`);
       } else if (p.role.key === "doctor") {
         this.send(p, `\n${tag.night} Protect someone: ${c.bold}/save <name|number>${c.reset}`);
+      } else if (p.role.key === "bodyguard") {
+        this.send(p, `\n${tag.night} Guard someone (not yourself): ${c.bold}/guard <name|number>${c.reset}`);
       } else if (p.role.key === "double_agent") {
         this.send(
           p,
@@ -320,6 +343,13 @@ export class Game {
       }
       this.actions.save = target.id;
       this.send(actor, `${tag.night} You will watch over ${c.bold}${target.name}${c.reset} tonight.`);
+    } else if (actor.role.key === "bodyguard") {
+      if (target.id === actor.id) {
+        this.send(actor, `${tag.warn} You can't guard yourself.`);
+        return false;
+      }
+      this.actions.guard = target.id;
+      this.send(actor, `${tag.night} You'll stand between ${c.bold}${target.name}${c.reset} and whoever comes for them.`);
     } else if (actor.role.key === "detective") {
       this.actions.check = { by: actor.id, target: target.id };
       actor.checked.add(target.id);
@@ -359,6 +389,35 @@ export class Game {
         c.green + `  ${victim.name} was attacked — and survived. Someone was watching over them.` + c.reset,
       );
       this.log.push({ type: "night", round: this.round, result: `${victim.name} saved` });
+    } else if (this.actions.guard === victim.id && this.alive().some((p) => p.role.key === "bodyguard")) {
+      const guard = this.alive().find((p) => p.role.key === "bodyguard");
+      guard.alive = false;
+      this.broadcast(
+        c.green +
+          `  ${victim.name} was attacked — but ${guard.name} took the bullet for them.` +
+          c.reset +
+          c.gray +
+          `  ${guard.name} was the Bodyguard.` +
+          c.reset,
+      );
+      this.send(
+        guard,
+        "\n" +
+          bigBanner("YOU DIED", c.red) +
+          "\n\n" +
+          box(
+            [
+              c.red + `You gave your life to protect ${victim.name}.` + c.reset,
+              c.gray + "You are now a spectator. You can see everything — the living cannot hear you." + c.reset,
+            ],
+            c.gray,
+          ),
+      );
+      this.log.push({
+        type: "night",
+        round: this.round,
+        result: `${victim.name} attacked — ${guard.name} died protecting them (Bodyguard)`,
+      });
     } else {
       victim.alive = false;
       this.broadcast(
@@ -520,6 +579,15 @@ export class Game {
     this.broadcast(
       c.bold + `  ${victim.name} is voted out (${best} votes).` + c.reset + "\n" + `  They were ${victim.role.color + c.bold + victim.role.name + c.reset}.`,
     );
+    this.log.push({ type: "vote", round: this.round, result: `${victim.name} eliminated (${victim.role.name})`, record });
+
+    if (victim.role.key === "jester") {
+      this.send(victim, "\n" + bigBanner("🎭 JESTER WINS", c.yellow) + "\n\n" + box([c.yellow + "You got exactly what you wanted." + c.reset], c.gray));
+      this.broadcast("\n" + c.yellow + c.bold + `  ${victim.name} was the Jester — they wanted this. 🎭` + c.reset);
+      this.end("jester");
+      return;
+    }
+
     this.send(
       victim,
       "\n" +
@@ -527,12 +595,14 @@ export class Game {
         "\n\n" +
         box([c.yellow + "The town turned on you." + c.reset, c.gray + "You are now a spectator." + c.reset], c.gray),
     );
-    this.log.push({ type: "vote", round: this.round, result: `${victim.name} eliminated (${victim.role.name})`, record });
   }
 
   /* ---------------- win condition ---------------- */
 
   checkWin() {
+    // resolveVote() may already have ended the game itself (Jester's
+    // instant win on elimination) before the loop gets a chance to ask.
+    if (this.phase === "over") return true;
     const alive = this.alive();
     const mafia = alive.filter((p) => p.role.team === "mafia");
     const town = alive.filter((p) => p.role.team === "town");
@@ -543,12 +613,15 @@ export class Game {
 
   end(winner) {
     this.phase = "over";
-    const win =
-      winner === "town"
-        ? c.green + c.bold + "  TOWN WINS — every Mafia has been buried." + c.reset
-        : c.red + c.bold + "  MAFIA WINS — they outnumber the living town." + c.reset;
-    this.broadcast("\n" + rule("GAME OVER", winner === "town" ? c.green : c.red));
-    this.broadcast("\n" + bigBanner(`${winner === "town" ? "TOWN" : "MAFIA"} WINS`, winner === "town" ? c.green : c.red) + "\n");
+    const WIN_TEXT = {
+      town: { label: "TOWN", color: c.green, line: "every Mafia has been buried." },
+      mafia: { label: "MAFIA", color: c.red, line: "they outnumber the living town." },
+      jester: { label: "JESTER", color: c.yellow, line: "they got exactly what they wanted — voted out." },
+    };
+    const info = WIN_TEXT[winner];
+    const win = info.color + c.bold + `  ${info.label} WINS — ${info.line}` + c.reset;
+    this.broadcast("\n" + rule("GAME OVER", info.color));
+    this.broadcast("\n" + bigBanner(`${info.label} WINS`, info.color) + "\n");
     this.broadcast(win + "\n");
 
     // Personalized verdict — everyone still in a team finds out on their own screen
